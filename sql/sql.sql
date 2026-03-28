@@ -2,36 +2,154 @@
 -- FUNCTION: สมัครสมาชิกและจัดการบัญชีผู้ใช้งาน (User Account Management)
 -- =============================================
 -- CREATE: สมัครสมาชิกใหม่
+INSERT INTO Visitor (VisitorID, FirstName, LastName, VisitorEmail, VisitorTel, DateOfBirth)
+VALUES (?, ?, ?, ?, ?, ?);
+
+INSERT INTO UserAccount (UserID, Username, Password, Role, AccountStatus, CreatedAt)
+VALUES (?, ?, ?, 'Visitor', 'Active', NOW());
+
+INSERT INTO has_visitor_account (UserID, VisitorID)
+VALUES (?, ?);
+
 -- READ: ตรวจสอบความซ้ำของ Email และ Username ก่อนสมัคร
+SELECT COUNT(*) FROM Visitor 
+WHERE VisitorEmail = ?;
+
+SELECT COUNT(*) FROM UserAccount 
+WHERE Username = ?;
+
 -- READ: ดูข้อมูลส่วนตัวและประวัติการใช้งาน
+SELECT 
+    v.VisitorID, v.FirstName, v.LastName, 
+    v.VisitorEmail, v.VisitorTel, v.DateOfBirth,
+    ua.Username, ua.AccountStatus, ua.CreatedAt
+FROM Visitor v
+JOIN has_visitor_account hva ON v.VisitorID = hva.VisitorID
+JOIN UserAccount ua ON hva.UserID = ua.UserID
+WHERE ua.UserID = ?;
+
 -- READ: ดูประวัติการซื้อตั๋ว
+SELECT 
+    t.TicketID, t.TicketType, t.Price, 
+    t.VisitDate, p.PromoCode
+FROM Ticket t
+JOIN Visitor v ON t.VisitorID = v.VisitorID
+LEFT JOIN Promotion p ON t.PromoCode = p.PromoCode
+WHERE v.VisitorID = ?
+ORDER BY t.VisitDate DESC;
+
 -- UPDATE: แก้ไขข้อมูลส่วนตัว
+UPDATE Visitor
+SET VisitorEmail = ?, FirstName = ?, LastName = ?, VisitorTel = ?
+WHERE VisitorID = ?;
+
 -- UPDATE: เปลี่ยนรหัสผ่าน
+UPDATE UserAccount
+SET Password = ?
+WHERE UserID = ?;
+
 -- DELETE: ยกเลิกบัญชี (เปลี่ยนสถานะเป็น Inactive)
+UPDATE UserAccount
+SET AccountStatus = 'Inactive'
+WHERE UserID = ?;
 
 -- =============================================
 -- FUNCTION: เข้าสู่ระบบและยืนยันตัวตน (Authentication)
 -- =============================================
 -- READ: ตรวจสอบ Username และ Password และสถานะบัญชี
+SELECT 
+    ua.UserID, ua.Username, ua.Role, ua.AccountStatus
+FROM UserAccount ua
+WHERE ua.Username = ?
+  AND ua.Password = ?
+  AND ua.AccountStatus = 'Active';
+
 -- READ: ดึงข้อมูล Visitor ที่เชื่อมกับบัญชีนี้ (กรณี Role = Visitor)
+SELECT 
+    v.VisitorID, v.FirstName, v.LastName, 
+    v.VisitorEmail, v.VisitorTel
+FROM Visitor v
+JOIN has_visitor_account hva ON v.VisitorID = hva.VisitorID
+WHERE hva.UserID = ?;
+
 -- READ: ดึงข้อมูล Admin ที่เชื่อมกับบัญชีนี้ (กรณี Role = Admin/Staff)
+SELECT 
+    a.AdminID, a.FirstName, a.Surname, 
+    a.Email, a.JobTitle
+FROM Admin a
+JOIN Manage m ON a.AdminID = m.AdminID
+WHERE m.UserID = ?;
+
 -- READ: ตรวจสอบสิทธิ์การเข้าถึงตาม Role
+SELECT 
+    ua.UserID, ua.Username, ua.Role
+FROM UserAccount ua
+WHERE ua.UserID = ?
+  AND ua.Role = 'Visitor';
 
 -- =============================================
 -- FUNCTION: จัดการสิทธิ์ผู้ใช้งาน (Role-based Access Management)
 -- =============================================
 -- CREATE: ตรวจสอบ Username ซ้ำก่อนสร้างบัญชี
--- CREATE: สร้างบัญชีผู้ใช้งานใหม่
--- READ: ตรวจสอบสิทธิ์การใช้งานและสถานะบัญชี
--- READ: ตรวจสอบสถานะบัญชีว่า Active หรือไม่
--- READ: ดึงรายการผู้ใช้งานทั้งหมดแยกตาม Role (เฉพาะ Admin)
--- READ: บันทึก Log การเข้าใช้งาน
--- UPDATE: อัปเดต Role ของผู้ใช้งาน
--- UPDATE: อัปเดตสถานะบัญชี (Active / Inactive)
--- UPDATE: บันทึกการแก้ไขโดย Admin ผ่านตาราง Manage
--- DELETE: ยกเลิกบัญชีผู้ใช้งาน (เปลี่ยนสถานะเป็น Inactive)
--- DELETE: บันทึก Log การยกเลิกบัญชีผ่านตาราง Manage
+SELECT COUNT(*) FROM UserAccount
+WHERE Username = ?;
 
+-- CREATE: สร้างบัญชีผู้ใช้งานใหม่
+INSERT INTO UserAccount (UserID, Username, Password, Role, AccountStatus, CreatedAt)
+VALUES (?, ?, ?, ?, 'Active', NOW());
+
+-- READ: ตรวจสอบสิทธิ์การใช้งานและสถานะบัญชี
+SELECT 
+    ua.UserID, ua.Username, ua.Role, 
+    ua.AccountStatus, ua.CreatedAt
+FROM UserAccount ua
+WHERE ua.Username = ?
+  AND ua.Password = ?;
+
+-- READ: ตรวจสอบสถานะบัญชีว่า Active หรือไม่
+SELECT 
+    ua.UserID, ua.Username, ua.Role, ua.AccountStatus
+FROM UserAccount ua
+WHERE ua.UserID = ?
+  AND ua.AccountStatus = 'Active';
+
+-- READ: ดึงรายการผู้ใช้งานทั้งหมดแยกตาม Role (เฉพาะ Admin)
+SELECT 
+    ua.UserID, ua.Username, ua.Role, 
+    ua.AccountStatus, ua.CreatedAt
+FROM UserAccount ua
+ORDER BY ua.Role, ua.Username;
+
+-- READ: บันทึก Log การเข้าใช้งาน
+SELECT 
+    ua.UserID, ua.Username, ua.Role,
+    ua.AccountStatus, NOW() AS LoginTime
+FROM UserAccount ua
+WHERE ua.UserID = ?;
+
+-- UPDATE: อัปเดต Role ของผู้ใช้งาน
+UPDATE UserAccount
+SET Role = ?
+WHERE UserID = ?;
+
+-- UPDATE: อัปเดตสถานะบัญชี (Active / Inactive)
+UPDATE UserAccount
+SET AccountStatus = ?
+WHERE UserID = ?;
+
+-- UPDATE: บันทึกการแก้ไขโดย Admin ผ่านตาราง Manage
+UPDATE Manage
+SET Edit_date = NOW(), Edit_detail = ?
+WHERE AdminID = ? AND UserID = ?;
+
+-- DELETE: ยกเลิกบัญชีผู้ใช้งาน (เปลี่ยนสถานะเป็น Inactive)
+UPDATE UserAccount
+SET AccountStatus = 'Inactive'
+WHERE UserID = ?;
+
+-- DELETE: บันทึก Log การยกเลิกบัญชีผ่านตาราง Manage
+INSERT INTO Manage (AdminID, UserID, Edit_date, Edit_detail)
+VALUES (?, ?, NOW(), 'Account deactivated');
 -- =============================================
 -- FUNCTION: ดูข้อมูลสัตว์และรายละเอียด (Animal Information Viewing)
 -- =============================================
