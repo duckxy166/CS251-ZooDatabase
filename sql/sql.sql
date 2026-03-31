@@ -1,258 +1,570 @@
 -- =============================================
--- FUNCTION: ดูข้อมูลสัตว์และรายละเอียด (Animal Information Viewing)
+-- FUNCTION: สมัครสมาชิกและจัดการบัญชีผู้ใช้งาน
 -- =============================================
 
--- READ: ค้นหาสัตว์จากชื่อ — ฟังก์ชันแรก ขอดูว่าเขียนมาดีแค่ไหน
-SELECT AnimalID, CommonName, ScientificName, Gender, BirthDate, ConservationStatus  -- เลือก 6 columns เฉพาะที่ต้องการ ไม่ SELECT * ถือว่าผ่าน
-FROM Animal  -- ตารางหลักของสัตว์ทุกตัว
-WHERE CommonName LIKE CONCAT('%', ?, '%'); -- [PERF] wildcard นำหน้า '%x%' = index ใช้ไม่ได้เลย full table scan ทุกครั้ง โอเคสำหรับสวนสัตว์เล็กๆ แต่ถ้า scale ควรพิจารณา FULLTEXT INDEX
+-- [MIGRATION] บังคับ Password เก็บเป็น Hash เท่านั้น VARCHAR(255) กว้างพอรองรับ bcrypt/argon2
+-- ถ้าใครยังเก็บ plain text อยู่ถือว่าควรออกจากวงการ
+ALTER TABLE UserAccount
+MODIFY COLUMN `Password` VARCHAR(255) NOT NULL;
 
--- READ: ค้นหาสัตว์จากประเภท/สายพันธุ์ — query นี้ง่ายและสะอาด
-SELECT AnimalID, CommonName, Species  -- column น้อย เบา เร็ว ดี
-FROM Animal  -- ตารางเดิม
-WHERE Species = ?; -- exact match ใช้ index ได้ดีกว่า query แรกมาก ขอชม
+-- CREATE: บันทึกข้อมูล Visitor ก่อนสร้างบัญชี
+-- [CONCURRENCY] ถ้าจะแก้ race condition จริงๆ ต้องมี UNIQUE constraint บน VisitorEmail ด้วย
+-- application layer ต้อง catch Duplicate Entry error เอง อย่าเขียน SELECT เช็กก่อน INSERT เด็ดขาด มันคือ anti-pattern
+-- INSERT ตรงๆ ไปเลยพังก็ช่างมัน เดี๋ยวแอพจัดการเอง
+INSERT INTO Visitor (VisitorFName, VisitorLName, VisitorDateOfBirth, VisitorTel, VisitorEmail)
+VALUES (?, ?, ?, ?, ?);
 
--- READ: ค้นหาสัตว์จากโซน — ต้อง JOIN 2 ชั้นเพราะ schema ออกแบบผ่าน Enclosure
-SELECT a.AnimalID, a.CommonName, a.Species, z.ZoneName -- เอา ZoneName มาด้วยดี ไม่ต้องให้ client query อีกรอบ
-FROM Animal a -- alias 'a' สั้นกระชับ
-JOIN Enclosure e ON a.EnclosureID = e.EnclosureID -- ขึ้นไปหา Enclosure ก่อนเพราะ Animal ไม่ได้ link Zone โดยตรง
-JOIN Zone z ON e.ZoneID = z.ZoneID -- ขึ้นไปถึง Zone แล้ว chain JOIN ปกติ
-WHERE z.ZoneID = ?; -- filter ด้วย ID ดีกว่า filter ชื่อ เพราะ ID unique และใช้ index ได้
+-- CREATE: สร้างบัญชีผู้ใช้โดยผูกกับ Visitor
+-- [NOTE] Password ตรงนี้ต้องรับ Hash มาจากฝั่ง Backend แล้วเท่านั้น ย้ำ!
+-- แอบยัด 'ใช้งานอยู่' เป็น default ไปเลย ขี้เกียจไปทำ flow ยืนยันอีเมลตอนนี้
+INSERT INTO UserAccount (VisitorID, EmployeeID, CreatedAt, AccountStatus, `Password`, Username)
+VALUES (?, NULL, NOW(), 'ใช้งานอยู่', ?, ?);
 
--- READ: ดูรายละเอียดสัตว์แบบเต็ม รวมข้อมูลพ่อแม่ — self-join สามชั้น อ่านแล้วรู้สึก respect
-SELECT  -- indent หลายบรรทัด อ่านง่ายกว่า one-liner มาก ถูกต้อง
-    a1.AnimalID, a1.CommonName, a1.ScientificName, a1.Gender, a1.BirthDate, -- ข้อมูลพื้นฐานของสัตว์ตัวนั้น
-    sire.CommonName AS FatherName,  -- self-join หาพ่อ alias 'sire' เป็นคำศัพท์ม้าพันธุ์ ฟังดูดี consistent กับ schema
-    dam.CommonName AS MotherName -- self-join หาแม่ 'dam' ก็ศัพท์เดียวกัน คู่กันพอดี
-FROM Animal a1 -- alias a1 เพราะต้องอ้างตัวเองหลายครั้งใน query นี้
-LEFT JOIN Animal sire ON a1.FatherID = sire.AnimalID -- LEFT JOIN เพราะสัตว์บางตัวไม่มีข้อมูลพ่อ ถ้าใช้ INNER JOIN จะหายไปเลย ถูกต้อง
-LEFT JOIN Animal dam ON a1.MotherID = dam.AnimalID -- LEFT JOIN เพราะสัตว์บางตัวไม่มีข้อมูลแม่ logic เดียวกัน consistent ดี
-WHERE a1.AnimalID = ?; -- lookup ด้วย primary key เร็วที่สุดเท่าที่จะเร็วได้
+-- READ: ดูข้อมูลส่วนตัวของผู้ใช้
+-- ดึงข้อมูลข้าม 2 ตารางเฉพาะ account ที่ active
+-- JOIN ไปเถอะ 2 ตารางแค่นี้ DB ไม่ร้องหรอก
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.CreatedAt,
+       v.VisitorID, v.VisitorFName, v.VisitorLName, v.VisitorDateOfBirth, v.VisitorTel, v.VisitorEmail
+FROM UserAccount ua
+JOIN Visitor v ON ua.VisitorID = v.VisitorID
+WHERE ua.UserID = ? AND ua.AccountStatus = 'ใช้งานอยู่';
 
--- READ: ค้นหาสัตว์จากหมวดหมู่ Conservation Status — query สั้นตรงไปตรงมา
-SELECT AnimalID, CommonName, Species, ConservationStatus  -- ดึง ConservationStatus มาด้วยเพื่อยืนยัน filter ที่ส่งมา
-FROM Animal  -- ตารางสัตว์
-WHERE ConservationStatus = ?; -- [NOTE] case-sensitive ใน MySQL default collation ต้องส่ง 'Endangered' ไม่ใช่ 'endangered' ไม่งั้นหาไม่เจอแบบงงๆ
+-- UPDATE: แก้ไขข้อมูลส่วนตัว
+-- JOIN UPDATE โหดๆ ไปเลยเพื่อแก้เฉพาะ profile ของ account ที่ยัง active
+-- เอาให้อยู่หมัดใน query เดียว ไม่ต้อง select ออกมาแก้แล้วยัดกลับไปให้เปลือง RTT
+UPDATE Visitor v
+JOIN UserAccount ua ON v.VisitorID = ua.VisitorID
+SET v.VisitorTel = ?, v.VisitorEmail = ?
+WHERE ua.UserID = ? AND ua.AccountStatus = 'ใช้งานอยู่';
 
--- =============================================
--- FUNCTION: ดูข้อมูลโซนและแผนที่สวนสัตว์ (Zone & Map Viewing)
--- =============================================
+-- UPDATE: เปลี่ยนรหัสผ่าน
+-- [SECURITY] ไม่ตรวจ old password ใน query แล้ว! เป็นหน้าที่ของ Application (bcrypt.compare)
+-- SQL มีหน้าที่แค่อัปเดต Hash ใหม่เข้า DB ให้ถูก User เท่านั้น
+-- อย่าให้จับได้ว่าเอา password ไป where นะ ตีมือหัก
+UPDATE UserAccount
+SET `Password` = ?
+WHERE UserID = ? AND AccountStatus = 'ใช้งานอยู่';
 
--- READ: ดึงข้อมูลโซนทั้งหมด — ดึงทุก row เลย ต้องมั่นใจว่า Zone มีไม่กี่สิบแถว
-SELECT ZoneID, ZoneName, Description, OpenTime, CloseTime  -- ครบสำหรับ listing page
-FROM Zone; -- ไม่มี WHERE ดึงหมดเลย ถ้า Zone น้อยก็โอเค ถ้าเยอะควรเพิ่ม pagination ไว้ก่อน
-
--- READ: ค้นหาโซนจากชื่อ — search suggestion แบบง่าย
-SELECT ZoneID, ZoneName  -- แค่ 2 columns สำหรับ dropdown/autocomplete เหมาะสม
-FROM Zone  -- ตารางโซน
-WHERE ZoneName LIKE CONCAT('%', ?, '%'); -- [PERF] ปัญหาเดิม wildcard นำหน้า ใช้ index ไม่ได้ แต่ Zone ไม่น่ามีพัน rows ก็ยังพอรับได้
-
--- READ: ดูรายละเอียดโซนพร้อมจำนวน Enclosure — aggregate query ที่เขียนถูก
-SELECT z.ZoneID, z.ZoneName, z.Description, COUNT(e.EnclosureID) AS TotalEnclosures -- COUNT นับ Enclosure ใน zone นั้น alias ชื่อชัดเจน
-FROM Zone z  -- ตาราง Zone เป็น base
-LEFT JOIN Enclosure e ON z.ZoneID = e.ZoneID -- LEFT JOIN สำคัญมาก ถ้าใช้ INNER JOIN zone ที่ยังไม่มี enclosure จะหายไปเงียบๆ
-WHERE z.ZoneID = ?  -- filter zone เดียวที่ต้องการ
-GROUP BY z.ZoneID, z.ZoneName, z.Description; -- GROUP BY ครบทุก non-aggregate column นี่คือ textbook correct ขอชม
-
--- READ: ดูรายชื่อสัตว์ทั้งหมดในโซน — ผ่าน Enclosure เหมือนเดิม
-SELECT a.AnimalID, a.CommonName, e.EnclosureName -- เอา EnclosureName มาด้วยดี รู้ว่าสัตว์อยู่กรงไหน
-FROM Animal a  -- ตารางสัตว์
-JOIN Enclosure e ON a.EnclosureID = e.EnclosureID -- INNER JOIN หา Enclosure
-WHERE e.ZoneID = ?; -- [NOTE] INNER JOIN นี้ทำให้สัตว์ที่ยังไม่มี Enclosure (EnclosureID = NULL) หายไปเงียบๆ ถ้า business logic ต้องการแสดงทุกตัว ให้เปลี่ยนเป็น LEFT JOIN
-
--- READ: ดูกิจกรรมที่จัดในโซน — query เรียบง่ายไม่มีอะไรซับซ้อน
-SELECT ActivityID, ActivityName, StartTime, EndTime  -- ข้อมูลกิจกรรมพื้นฐาน
-FROM Activity  -- ตารางกิจกรรม
-WHERE ZoneID = ?; -- filter ตาม zone ตรงไปตรงมา index บน ZoneID จะช่วยได้มาก
-
--- READ: สรุปภาพรวมทุกโซน (สำหรับแสดงบน Map UI) — query เฉพาะ UI ไม่เอาขยะมาด้วย
-SELECT ZoneID, ZoneName, MapCoordinateX, MapCoordinateY, IconPath  -- เลือกเฉพาะ columns ที่ map ต้องการ ไม่ดึง Description มาเพื่อความเบา
-FROM Zone; -- ดึงทุก zone สำหรับ initial map render ซึ่งสมเหตุสมผล
+-- DELETE: ยกเลิกบัญชีแบบผู้ดี (Soft Delete)
+-- [DESIGN] ไม่ลบ row จริงเพราะเดี๋ยว Foreign Key พัง แค่เปลี่ยน Status พอ
+-- เก็บศพไว้ดูเล่นเผื่อมีปัญหาทางการเงินตามมาทีหลัง
+UPDATE UserAccount
+SET AccountStatus = 'ถูกปิดใช้งาน'
+WHERE UserID = ?;
 
 -- =============================================
--- FUNCTION: ดูตารางการแสดงสัตว์ (Show Schedule Viewing)
+-- FUNCTION: เข้าสู่ระบบและยืนยันตัวตน
 -- =============================================
 
--- READ: ดึงตารางการแสดงทั้งหมดที่ยังไม่ผ่านมา — ดูดีแต่ logic ซ่อน bug ไว้
-SELECT ShowID, ShowName, ShowDate, StartTime, EndTime, ZoneID  -- ข้อมูลครบสำหรับ schedule listing
-FROM ShowSchedule  -- ตาราง schedule การแสดง
--- [BUG] logic ผิด! AND ทำให้ filter ทั้งสองเงื่อนไขพร้อมกัน ถ้า ShowDate = พรุ่งนี้ แต่ StartTime = 09:00 น. และ CURTIME() = 10:00 น. show นั้นจะ filter ทิ้งทั้งที่ยังไม่ผ่านมา
--- แก้ไขเป็น: WHERE (ShowDate > CURDATE()) OR (ShowDate = CURDATE() AND StartTime >= CURTIME())
-WHERE ShowDate >= CURDATE() AND StartTime >= CURTIME() -- [BUG] ดู comment บรรทัดบน
-ORDER BY ShowDate ASC, StartTime ASC; -- sort วันและเวลาจากน้อยไปมาก ถูกต้อง
+-- READ: ตรวจสอบข้อมูลเข้าสู่ระบบและ role ที่อนุมานจาก schema
+-- [SECURITY] ดึง PasswordHash กลับไปให้ Backend ตรวจ อย่าใช้ `AND Password = ?` ใน WHERE เด็ดขาด!
+-- [DESIGN] IsAdmin สร้างจาก logic ง่ายๆ: ถ้า EmployeeID ไม่ใช่ NULL ก็คือ Admin
+-- LIMIT 1 ไว้กันเหนียว เผื่อเผลอแจก Username ซ้ำจะได้ไม่พังคาที่
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.VisitorID, ua.EmployeeID,
+       ua.`Password` AS PasswordHash,
+       (ua.EmployeeID IS NOT NULL) AS IsAdmin
+FROM UserAccount ua
+WHERE ua.Username = ? AND ua.AccountStatus = 'ใช้งานอยู่'
+LIMIT 1;
 
--- READ: กรองตารางการแสดงตามวันที่ — query ตรงไปตรงมา
-SELECT ShowID, ShowName, StartTime, EndTime, ZoneID  -- ข้อมูลพอสำหรับ filter by date view
-FROM ShowSchedule  -- ตาราง schedule
-WHERE ShowDate = ?; -- exact date match เร็วถ้ามี index บน ShowDate
+-- =============================================
+-- FUNCTION: จัดการสิทธิ์ผู้ใช้งาน
+-- =============================================
 
--- READ: กรองตารางการแสดงตามประเภท — เหมือน query บน
-SELECT ShowID, ShowName, ShowType, StartTime, EndTime  -- เอา ShowType มาในผลลัพธ์ด้วย ดี ยืนยัน filter ที่ส่งมาให้ user เห็น
-FROM ShowSchedule  -- ตาราง schedule
-WHERE ShowType = ?; -- exact match กับ type ต้องส่งค่ามาให้ตรง case ด้วย
+-- READ: เช็กสิทธิ์การใช้งานจาก UserID (เอาไว้ Re-verify token)
+-- เหมือนข้างบนเป๊ะ แค่เปลี่ยนเป็นเช็กจาก UserID เปลือง query ชะมัดแต่ก็ต้องทำ
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.VisitorID, ua.EmployeeID,
+       (ua.EmployeeID IS NOT NULL) AS IsAdmin
+FROM UserAccount ua
+WHERE ua.UserID = ? AND ua.AccountStatus = 'ใช้งานอยู่'
+LIMIT 1;
+
+-- READ: ดึงข้อมูลบัญชีทั้งหมดสำหรับ Admin
+-- ดึงพรืดเดียวจบ เอาข้อมูล Visitor กับ Admin มาต่อกัน
+-- [NOTE] กรองเฉพาะคนที่ 'ใช้งานอยู่' ไม่เอาศพมาแสดง
+-- LEFT JOIN 2 ขากางร่มรับทั้งฝั่งคนมาเที่ยวและพนักงาน
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.CreatedAt,
+       ua.VisitorID, ua.EmployeeID,
+       v.VisitorFName, v.VisitorLName, v.VisitorEmail,
+       a.FirstName AS AdminFirstName, a.Surname AS AdminSurname, a.Email AS AdminEmail
+FROM UserAccount ua
+LEFT JOIN Visitor v ON ua.VisitorID = v.VisitorID
+LEFT JOIN Admin a ON ua.EmployeeID = a.AdminID
+WHERE ua.AccountStatus = 'ใช้งานอยู่'
+ORDER BY ua.CreatedAt DESC;
+
+-- READ: ค้นหาบัญชีผู้ใช้ตาม Username
+-- [PERF] LIKE 'prefix%' ใช้ Index ได้ อย่าทะลึ่งใส่ '%x%' เด็ดขาดถ้าไม่อยากให้ DB ร้องไห้
+-- Search แค่ Username พอละ ขี้เกียจไปไล่หาในอีเมลให้เปลือง CPU
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.CreatedAt,
+       v.VisitorEmail,
+       a.Email AS AdminEmail
+FROM UserAccount ua
+LEFT JOIN Visitor v ON ua.VisitorID = v.VisitorID
+LEFT JOIN Admin a ON ua.EmployeeID = a.AdminID
+WHERE ua.AccountStatus = 'ใช้งานอยู่' AND ua.Username LIKE CONCAT(?, '%');
+
+-- UPDATE: อัปเดตสถานะบัญชี
+-- ให้ Admin สั่งแบน (ถูกปิดใช้งาน) หรือปลดแบน (ใช้งานอยู่) ได้
+-- ควบคุมชะตาชีวิต User ง่ายๆ ด้วยบรรทัดเดียว
+UPDATE UserAccount
+SET AccountStatus = ?
+WHERE UserID = ?;
+
+-- CREATE: บันทึกว่า Admin คนไหนแก้บัญชีใด
+-- Audit Trail ขำๆ ใครทำอะไรเมื่อไหร่บันทึกไว้หมด
+-- เก็บไว้เป็นหลักฐานเผื่อมีใครซวย จะได้หาแพะเจอ
+INSERT INTO Manage_By (AdminID, UserID, Edit_date, Edit_detail)
+VALUES (?, ?, CURDATE(), ?);
+
+-- DELETE: ยกเลิกบัญชีผู้ใช้งาน (Soft Delete)
+-- ซ้ำกับข้างบน แต่เอาไว้ให้ Admin ใช้
+-- แบนทิ้งไปเลย ไม่ต้องถามความสมัครใจ
+UPDATE UserAccount
+SET AccountStatus = 'ถูกปิดใช้งาน'
+WHERE UserID = ?;
+
+-- =============================================
+-- FUNCTION: จัดการข้อมูลสัตว์
+-- =============================================
+
+-- CREATE: เพิ่มข้อมูลสัตว์ใหม่
+-- ท่ามาตรฐาน INSERT ปกติ
+-- ช่องเพียบ พิมพ์ผิดชีวิตเปลี่ยน ยัดๆ ไปเถอะ
+INSERT INTO Animal (EnclosureID, SpeciesID, AnimalName, Gender, BirthDate, ArrivalDate, FatherID, MotherID)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+-- READ: ดูข้อมูลสัตว์ทั้งหมดสำหรับ Admin
+-- JOIN 3 ชั้นเพื่อเอาชื่อสายพันธุ์และชื่อโซนมาโชว์ในตารางเดียว
+-- LEFT JOIN กรงกับโซนเผื่อมันยังเร่ร่อนไม่มีที่อยู่
+SELECT a.AnimalID, a.AnimalName, s.SpeciesName, s.ScientificName, a.Gender, a.BirthDate, a.ArrivalDate,
+       e.EnclosureID, z.ZoneName, s.ConservationStatus
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID
+LEFT JOIN Enclosure e ON a.EnclosureID = e.EnclosureID
+LEFT JOIN Zone z ON e.ZoneID = z.ZoneID
+ORDER BY a.AnimalName ASC;
+
+-- READ: ดูรายละเอียดสัตว์สำหรับ Admin
+-- ข้อมูลมาเต็มแม็กซ์ JOIN แหลก เอาไว้ทำหน้ารายละเอียดสัตว์
+-- ดึงมาก่อน ใช้ไม่ใช้เดี๋ยวค่อยไป filter ทิ้งฝั่ง Frontend เองละกัน
+SELECT a.AnimalID, a.AnimalName, a.Gender, a.BirthDate, a.ArrivalDate,
+       s.SpeciesID, s.SpeciesName, s.ScientificName, s.TaxonomyCategory, s.Origin, s.AverageLifespan, s.ConservationStatus,
+       e.EnclosureID, e.EnType, e.Status AS EnclosureStatus, e.Capacity,
+       z.ZoneID, z.ZoneName, z.ZoneDescrip, z.ZoneType
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID
+LEFT JOIN Enclosure e ON a.EnclosureID = e.EnclosureID
+LEFT JOIN Zone z ON e.ZoneID = z.ZoneID
+WHERE a.AnimalID = ?;
+
+-- UPDATE: แก้ไขข้อมูลสัตว์
+-- แตะเฉพาะข้อมูลชีววิทยา ไม่ยุ่งกับสถานที่
+-- อัปเดตยกแผง ไม่สนลูกอีช่างขอแก้แค่ฟิลด์เดียว
+UPDATE Animal
+SET SpeciesID = ?, AnimalName = ?, Gender = ?, BirthDate = ?, ArrivalDate = ?, FatherID = ?, MotherID = ?
+WHERE AnimalID = ?;
+
+-- UPDATE: ย้ายกรงของสัตว์
+-- แยก function ชัดเจน นี่คือการย้ายบ้าน
+-- ย้ายกรงรัวๆ อย่าลืมว่าต้องมีกรงให้ย้ายด้วยล่ะ
+UPDATE Animal
+SET EnclosureID = ?
+WHERE AnimalID = ?;
+
+-- DELETE: ลบข้อมูลสัตว์
+-- [WARNING] Hard Delete! แน่ใจนะว่าไม่มี FK constraint ติดอยู่ในตารางอื่น? ถ้ามีลบไม่ลงนะ
+-- ถ้าลบแล้วระบบพังก็ตัวใครตัวมันล่ะงานนี้
+DELETE FROM Animal
+WHERE AnimalID = ?;
+
+-- =============================================
+-- FUNCTION: ดูข้อมูลสัตว์และรายละเอียด
+-- =============================================
+
+-- READ: ค้นหาสัตว์จากชื่อ
+-- [PERF] บังคับค้นหาแบบ Prefix (เริ่มด้วยคำที่พิมพ์) เพื่อให้ Index บน AnimalName ทำงานได้
+-- ห้ามแอบเติม % ไว้ข้างหน้าเด็ดขาด ฉันดักไว้แล้ว!
+SELECT a.AnimalID, a.AnimalName, s.SpeciesName, s.ScientificName, a.Gender, a.BirthDate, s.ConservationStatus
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID
+WHERE a.AnimalName LIKE CONCAT(?, '%');
+
+-- READ: ค้นหาสัตว์จากประเภท/สายพันธุ์
+-- Exact match เร็วสุดๆ
+-- ปังๆ โดนใจ index หาเจอในเสี้ยววิ
+SELECT a.AnimalID, a.AnimalName, s.SpeciesID, s.SpeciesName
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID
+WHERE a.SpeciesID = ?;
+
+-- READ: ค้นหาสัตว์จากโซน
+-- ขี่ JOIN ขึ้นไปจาก Animal -> Enclosure -> Zone ท่าเบสิกของ schema แบบนี้
+-- ใครออกแบบให้สัตว์ไม่ได้อยู่โซนตรงๆ วะ ซับซ้อนชิบเป๋ง แต่ก็ทำได้
+SELECT a.AnimalID, a.AnimalName, s.SpeciesName, z.ZoneName
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID
+JOIN Enclosure e ON a.EnclosureID = e.EnclosureID
+JOIN Zone z ON e.ZoneID = z.ZoneID
+WHERE z.ZoneID = ?;
+
+-- READ: ดูรายละเอียดสัตว์แบบเต็ม รวมข้อมูลพ่อแม่
+-- [PRO LEVEL] Self-Join 2 ชั้น เพื่อดึงชื่อพ่อ(sire) และชื่อแม่(dam) ใน Query เดียว
+-- LEFT JOIN โคตรสำคัญตรงนี้ ไม่งั้นตัวไหนกำพร้าจะหายไปจากผลลัพธ์เลย
+-- เอาให้สุด ดึงมาหมดทั้งโคตรเหง้าศักราช
+SELECT a1.AnimalID, a1.AnimalName, a1.Gender, a1.BirthDate, a1.ArrivalDate,
+       s.SpeciesName, s.ScientificName, s.TaxonomyCategory, s.Origin, s.AverageLifespan, s.ConservationStatus,
+       sire.AnimalName AS FatherName,
+       dam.AnimalName AS MotherName,
+       e.EnclosureID, e.EnType, e.Status AS EnclosureStatus, e.Capacity,
+       z.ZoneName
+FROM Animal a1
+JOIN Species s ON a1.SpeciesID = s.SpeciesID
+LEFT JOIN Animal sire ON a1.FatherID = sire.AnimalID
+LEFT JOIN Animal dam ON a1.MotherID = dam.AnimalID
+LEFT JOIN Enclosure e ON a1.EnclosureID = e.EnclosureID
+LEFT JOIN Zone z ON e.ZoneID = z.ZoneID
+WHERE a1.AnimalID = ?;
+
+-- READ: ค้นหาสัตว์จากหมวดหมู่ Conservation Status
+-- ตรงไปตรงมา ไม่มีอะไรซับซ้อน
+-- สถานะใกล้สูญพันธุ์ก็ดึงออกมาโชว์ให้หมด จะได้สงสาร
+SELECT a.AnimalID, a.AnimalName, s.SpeciesName, s.ConservationStatus
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID
+WHERE s.ConservationStatus = ?;
+
+-- =============================================
+-- FUNCTION: ดูข้อมูลโซนและแผนที่สวนสัตว์
+-- =============================================
+
+-- READ: ดึงข้อมูลโซนทั้งหมด
+-- เอาไว้ render list โซนเริ่มต้น
+-- กวาดมาให้หมด โซนมีไม่เยอะหรอก ไม่ต้องทำ Pagination ให้ปวดหัว
+SELECT ZoneID, ZoneName, ZoneDescrip, ZoneType -- 4 field ที่ Front ต้องการทั้งหมดอยู่ดี ดึงมาเลย
+FROM Zone; -- Full scan แต่โซนมีแค่หยิบมือ ไม่ตายหรอก
+
+-- READ: ค้นหาโซนจากชื่อ
+-- [PERF] Prefix search ใช้ index ได้
+-- ไว้ทำ Dropdown ให้คนหาโซนแบบกากๆ
+SELECT ZoneID, ZoneName -- แค่ ID กับชื่อ ทำ Dropdown ก็พอ ไม่ต้องดึง Description มาเปลืองแบนด์วิดท์
+FROM Zone
+WHERE ZoneName LIKE CONCAT(?, '%'); -- prefix search ใช้ index บน ZoneName ได้ อย่าใส่ % ข้างหน้าเด็ดขาด
+
+-- READ: ดูรายละเอียดโซนพร้อมจำนวน Enclosure
+-- [DATA INTEGRITY] Aggregate พร้อม LEFT JOIN เพื่อนับกรงทั้งหมดในโซน ถ้าไม่มีกรงก็ออก 0
+-- จัด GROUP BY เต็มยศเพราะโหมด ONLY_FULL_GROUP_BY มันบังคับ ขัดใจชะมัด
+SELECT z.ZoneID, z.ZoneName, z.ZoneDescrip, z.ZoneType, COUNT(e.EnclosureID) AS TotalEnclosures -- นับกรงรวมใน Zone นี้ ถ้าไม่มีกรงได้ 0 ดีกว่าหาย
+FROM Zone z
+LEFT JOIN Enclosure e ON z.ZoneID = e.ZoneID -- LEFT เพราะโซนว่างๆ ไม่มีกรงก็ต้องออกมา ได้ COUNT = 0
+WHERE z.ZoneID = ? -- ดึงแค่ Zone เดียวตาม ID ไม่ full scan
+GROUP BY z.ZoneID, z.ZoneName, z.ZoneDescrip, z.ZoneType; -- ต้อง list ทุก non-aggregate column เพราะ ONLY_FULL_GROUP_BY บังคับ ขัดใจแต่ก็ถูก
+
+-- READ: ดูรายชื่อสัตว์ทั้งหมดในโซน
+-- ดิ่งลงไปหา Animal จาก Zone -> Enclosure
+-- สัตว์ตัวไหนกรงพัง ไม่มีกรงอยู่ ก็หายวับไปกับสายลมจาก INNER JOIN อันนี้แหละ
+SELECT a.AnimalID, a.AnimalName, s.SpeciesName, e.EnclosureID -- field หลักสำหรับ list สัตว์ในโซน
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID -- ต้องการชื่อสปีชีส์มาโชว์ด้วย ไม่งั้น ID ดิบๆ ดูไม่รู้เรื่อง
+JOIN Enclosure e ON a.EnclosureID = e.EnclosureID -- INNER JOIN ดังนั้นสัตว์ที่ไม่มีกรง = หายไปเลย ใครออกแบบ schema นี้รู้ตัวนะ
+WHERE e.ZoneID = ?; -- filter ผ่านกรง -> โซน เพราะ Animal ไม่มี ZoneID ตรงๆ ทางเดียวที่ทำได้ใน schema นี้
+
+-- READ: ดูกิจกรรมที่จัดในโซน
+-- List schedule กิจกรรมตาม Zone
+-- ดึงมาโชว์หน้าโซนตรงๆ
+SELECT EventID, EventName, EventDate, EventTime, EventDetail -- field ที่ต้องโชว์ใน event card ของหน้าโซน
+FROM EventSchedule
+WHERE ZoneID = ?; -- กรองกิจกรรมของ Zone นี้โดยตรง ZoneID ต้องมี index นะ
+
+-- READ: สรุปภาพรวมทุกโซน (schema ปัจจุบันยังไม่มีพิกัด map)
+-- [TODO] ถ้าจะทำ map จริงๆ ต้องไปเพิ่ม column MapCoordinateX, Y ในตาราง Zone ก่อน
+-- ตอนนี้ก็ส่งข้อมูลขยะไปให้ Frontend มโนแผนที่เอาเองก่อนละกัน
+SELECT ZoneID, ZoneName, ZoneType, ZoneDescrip -- ซ้ำกับ query แรกเลย แค่สลับลำดับ column แต่ purpose ต่างกันคือส่งให้ Frontend มโนแผนที่
+FROM Zone; -- [TODO] ถ้าอยากทำ map จริงๆ ต้องไปเพิ่ม MapX, MapY ใน Zone ก่อน ตอนนี้ full scan ส่งขยะไปก่อนละกัน
+
+-- =============================================
+-- FUNCTION: ดูตารางการแสดงสัตว์
+-- =============================================
+
+-- READ: ดึงตารางการแสดงทั้งหมดที่ยังไม่ผ่านมา
+-- [LOGIC] กรองเฉพาะโชว์ในอนาคต (วันที่เกินวันนี้) หรือ (วันนี้ แต่เวลาเกินตอนนี้)
+-- ถ้าไม่อยากโชว์ของเก่าให้โดนด่า ก็ต้องเขียนโคตรเงื่อนไข OR แบบนี้แหละ
+SELECT EventID, EventName, EventDate, EventTime, ZoneID, EventDetail -- ทุก field ที่ calendar หน้า schedule ต้องการ
+FROM EventSchedule
+WHERE (EventDate > CURDATE()) OR (EventDate = CURDATE() AND EventTime >= CURTIME()) -- อนาคตล้วนๆ: วันหน้า หรือ วันนี้แต่เวลายังไม่ผ่าน OR condition นี้โหดพอสมควร
+ORDER BY EventDate ASC, EventTime ASC; -- เรียงจากใกล้สุดก่อน UX พื้นฐานที่ลืมทำกันบ่อยมาก
+
+-- READ: กรองตารางการแสดงตามวันที่
+-- Exact match ตามวันที่ระบุ
+-- โชว์ของวันไหนก็ดึงวันนั้น จบๆ ไป
+SELECT EventID, EventName, EventTime, ZoneID, EventDetail -- ไม่ดึง EventDate เพราะ WHERE filter มาแล้ว ดึงมาก็ซ้ำซ้อน
+FROM EventSchedule
+WHERE EventDate = ?; -- exact match วันที่ ใช้ index ได้ถ้ามี index บน EventDate
+
+-- READ: กรองตารางการแสดงตามประเภท/คำสำคัญ
+-- ค้นหาชื่อและรายละเอียดกิจกรรม
+-- LIKE บ้าบอคอแตก หวังว่าข้อมูลคงไม่ถึงล้านบรรทัดนะ ไม่งั้นระเบิด
+SELECT EventID, EventName, EventDate, EventTime, ZoneID, EventDetail -- ดึงครบสำหรับหน้า search result
+FROM EventSchedule
+WHERE EventName LIKE CONCAT(?, '%') OR EventDetail LIKE CONCAT(?, '%'); -- prefix ทั้งคู่ แต่ OR ทำให้ optimizer ต้องทำงานหนักขึ้น ระวังถ้าข้อมูลเยอะ
 
 -- READ: ดูรายละเอียดการแสดง พร้อมรายชื่อสัตว์ที่ร่วมแสดงและโซนที่จัด
-SELECT  -- indent หลายบรรทัด query ซับซ้อนควรทำแบบนี้ อ่านง่ายกว่า
-    ss.ShowName, ss.ShowDate, ss.StartTime, ss.EndTime,  -- ข้อมูลหลักของ show
-    z.ZoneName,  -- โซนที่จัด show ดึงมาแสดงเลย ไม่ต้อง query ซ้ำ
-    GROUP_CONCAT(a.CommonName SEPARATOR ', ') AS ParticipatingAnimals -- รวมชื่อสัตว์ทุกตัวเป็น string เดียว MySQL-specific syntax ใช้กับ DB อื่นไม่ได้
-FROM ShowSchedule ss -- ตาราง schedule alias ss
-JOIN Zone z ON ss.ZoneID = z.ZoneID -- JOIN หา ZoneName
-LEFT JOIN Show_Animal sa ON ss.ShowID = sa.ShowID -- LEFT JOIN เพราะ show อาจยังไม่มีสัตว์ assign ถ้าใช้ INNER JOIN show นั้นหายไปเลย
-LEFT JOIN Animal a ON sa.AnimalID = a.AnimalID -- LEFT JOIN ตามมา consistent กับบรรทัดบน
-WHERE ss.ShowID = ?  -- filter show เดียว
--- [BUG] GROUP BY แค่ ShowID ใน MySQL ONLY_FULL_GROUP_BY mode (default ตั้งแต่ 5.7.5) จะ error เพราะ ShowName, ShowDate, StartTime, EndTime, ZoneName ไม่อยู่ใน GROUP BY
--- แก้ไขเป็น: GROUP BY ss.ShowID, ss.ShowName, ss.ShowDate, ss.StartTime, ss.EndTime, z.ZoneName
-GROUP BY ss.ShowID; -- [BUG] ดู comment บรรทัดบน
+-- [AGGREGATION] GROUP_CONCAT รวบชื่อสัตว์ทุกตัวที่ร่วมโชว์มาเป็น string เดียว คั่นด้วย comma ฝั่ง client จะได้ไม่ต้องลูปแมพเอง
+-- หน้าที่ของ SQL คือทำ data ให้ย่อยง่ายสุด ฝั่งโน้นจะได้ไม่ต้องเขียนโค้ดเยิ่นเย้อ
+SELECT es.EventID, es.EventName, es.EventDate, es.EventTime, es.EventDetail, -- ข้อมูลหลักของ event ทั้งหมด
+       z.ZoneName, -- ชื่อโซน JOIN มาโชว์แทน ZoneID ดิบๆ
+       GROUP_CONCAT(a.AnimalName SEPARATOR ', ') AS ParticipatingAnimals -- รวมชื่อสัตว์ทุกตัวเป็น string เดียว Front ไม่ต้องลูปเองอีกแล้ว
+FROM EventSchedule es
+JOIN Zone z ON es.ZoneID = z.ZoneID -- INNER JOIN เพราะ event ต้องมีโซนเสมอ ถ้าโซนหายก็ควรพัง
+LEFT JOIN Show_Reference sr ON es.EventID = sr.EventID -- LEFT เผื่อ event ที่ไม่มีสัตว์ร่วมแสดงจะได้ไม่หายไป
+LEFT JOIN Animal a ON sr.AnimalID = a.AnimalID -- LEFT ตามมา ถ้าไม่มีสัตว์ ParticipatingAnimals จะเป็น NULL
+WHERE es.EventID = ? -- ระบุ event เดียว ไม่ดึงมาทั้งหมด
+GROUP BY es.EventID, es.EventName, es.EventDate, es.EventTime, es.EventDetail, z.ZoneName; -- GROUP_CONCAT บังคับ GROUP BY ทุก non-aggregate column ไม่มีทางลัด
 
 -- =============================================
--- FUNCTION: ค้นหาและแนะนำข้อมูล (Search & Recommendation)
+-- FUNCTION: ค้นหาและแนะนำข้อมูล
 -- =============================================
 
--- READ: ค้นหาแบบ Global Search (สัตว์ + โซน + กิจกรรม) — UNION 3 ตาราง ระวัง overhead
-SELECT 'Animal' AS Type, AnimalID AS ID, CommonName AS Name FROM Animal WHERE CommonName LIKE CONCAT('%', ?, '%') -- ค้นหา Animal ด้วย wildcard ใช้ index ไม่ได้ full scan อีกแล้ว
-UNION -- UNION ตัดผลซ้ำออกโดยเปรียบทุก column หาก Type+ID+Name ซ้ำกันข้ามตารางจะ merge ซึ่งแทบเป็นไปไม่ได้ แต่เพิ่ม overhead ถ้าต้องการเร็วกว่านี้ใช้ UNION ALL
-SELECT 'Zone' AS Type, ZoneID AS ID, ZoneName AS Name FROM Zone WHERE ZoneName LIKE CONCAT('%', ?, '%') -- ค้นหา Zone เช่นกัน
-UNION -- UNION อีกรอบ
-SELECT 'Activity' AS Type, ActivityID AS ID, ActivityName AS Name FROM Activity WHERE ActivityName LIKE CONCAT('%', ?, '%'); -- [NOTE] ? parameter ส่ง 3 ครั้ง (1 ต่อ UNION) ต้องไม่ลืมส่งครบ
+-- READ: ค้นหาแบบ Global Search (สัตว์ + โซน + กิจกรรม)
+-- [PERF] ยอมใช้ UNION กวาด 3 ตารางเพราะต้องการผลรวมศูนย์กลาง ค้นด้วย prefix สบายๆ
+-- โคตร overhead แต่ก็ต้องทำเพราะ User อยากค้นปุ่มเดียวเจอทุกสิ่งครอบจักรวาล
+SELECT 'Animal' AS Type, a.AnimalID AS ID, a.AnimalName AS Name -- hardcode Type string ไว้ Front จะได้รู้ว่า row นี้คืออะไร
+FROM Animal a
+WHERE a.AnimalName LIKE CONCAT(?, '%') -- prefix search สัตว์ ใช้ index ได้
+UNION -- UNION ไม่ใช่ UNION ALL บล็อก duplicate อยู่แล้ว ช้ากว่า ALL นิดนึงแต่ยอมได้
+SELECT 'Zone' AS Type, z.ZoneID AS ID, z.ZoneName AS Name -- ชุดเดียวกันสำหรับโซน
+FROM Zone z
+WHERE z.ZoneName LIKE CONCAT(?, '%') -- prefix search โซน
+UNION -- แบบเดียวกันเลย รูปแบบ UNION นี้แหล่มาก แต่ต้องทำเพื่อ search ปุ่มเดียว
+SELECT 'Event' AS Type, es.EventID AS ID, es.EventName AS Name -- สุดท้ายคือกิจกรรม
+FROM EventSchedule es
+WHERE es.EventName LIKE CONCAT(?, '%'); -- prefix สุดท้าย 3 ? 3 ค่า อย่าลืมใส่ param ให้ครบ Backend จะเหนือย
 
--- READ: แนะนำสัตว์ที่อยู่ในสถานะใกล้สูญพันธุ์ — สั้นดี แต่มีจุดสังเกต
-SELECT AnimalID, CommonName, Species  -- ข้อมูลพอสำหรับ recommendation card
-FROM Animal  -- ตารางสัตว์
-WHERE ConservationStatus IN ('Endangered', 'Critically Endangered') -- IN clause อ่านง่ายกว่า OR ถูกต้อง
-LIMIT 5; -- [NOTE] LIMIT 5 โดยไม่มี ORDER BY = ได้ 5 ตัวสุ่มจาก engine ทุกครั้ง ถ้าต้องการ consistent ควรเพิ่ม ORDER BY เช่น ORDER BY CommonName ASC
+-- READ: แนะนำสัตว์ที่อยู่ในสถานะใกล้สูญพันธุ์
+-- [DESIGN] ดึงตัวที่น่าสนใจมาโชว์หน้าแรก
+-- สุ่มโชว์ 5 ตัวที่น่าสงสารที่สุด หวังว่าคนจะคลิกเข้าไปดู
+SELECT a.AnimalID, a.AnimalName, s.SpeciesName -- minimal field เอาไว้แค่ card หน้าแรก
+FROM Animal a
+JOIN Species s ON a.SpeciesID = s.SpeciesID -- ต้องการ ConservationStatus กับชื่อสปีชีส์จาก Species เลย JOIN
+WHERE s.ConservationStatus IN ('Endangered', 'Critically Endangered') -- เฉพาะสัตว์ใกล้สูญพันธุ์ สวสามหน้าแรกให้ได้สงสารสักนิด
+ORDER BY a.AnimalName ASC -- เรียง A-Z ตายตัว ตัด ORDER BY RAND() ที่ช้ากว่านี้ 3 เท่า
+LIMIT 5; -- แค่ 5 ตัวพอ หน้าแรกไม่ใช่ Zoo Annual Report
 
--- READ: แนะนำกิจกรรมที่กำลังจะมาถึง — ระวัง type ของ StartTime
-SELECT ActivityID, ActivityName, StartTime, ZoneID  -- ข้อมูลพื้นฐานของกิจกรรม
-FROM Activity  -- ตารางกิจกรรม
--- [NOTE] ถ้า StartTime เป็น TIME type (ไม่ใช่ DATETIME) การเปรียบกับ NOW() ที่เป็น DATETIME จะให้ผลแปลกหรือ error ขึ้นอยู่กับ DB engine ตรวจ schema ก่อนไปใช้งานจริง
-WHERE StartTime BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 2 HOUR) -- [NOTE] ดู comment บรรทัดบน
-ORDER BY StartTime ASC; -- sort จากใกล้สุดก่อน ถูกต้อง
+-- READ: แนะนำกิจกรรมที่กำลังจะมาถึงภายใน 2 ชั่วโมง
+-- [LOGIC] เล่นกับ TIMESTAMP(Date, Time) ประกอบร่างเทียบกับ NOW() แบบเป๊ะๆ
+-- ฟังก์ชันปราบเซียน ใครใช้ Date กับ Time แยกตารางกัน ก็ต้องมาทนเขียนอะไรเหนื่อยๆ แบบนี้
+SELECT EventID, EventName, EventDate, EventTime, ZoneID -- field สำหรับโชว์ card กิจกรรมใกล้ๆ
+FROM EventSchedule
+WHERE TIMESTAMP(EventDate, EventTime) BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 2 HOUR) -- ประกอบ Date+Time เป็น TIMESTAMP แล้วเทียบกับ NOW() เพราะ schema แยก column ไว้ เหนือยแต่เป็นทางเดียว
+ORDER BY EventDate ASC, EventTime ASC; -- เรียงจากใกล้สุดก่อน จะรู้ว่ามีอะไรเดี๋ยวนี้
 
--- READ: แนะนำสัตว์ยอดนิยม — logic ดีแต่ GROUP BY พัง
-SELECT a.AnimalID, a.CommonName, COUNT(v.ViewID) AS ViewCount -- นับจำนวนครั้งที่ถูกดู
-FROM Animal a  -- ตารางสัตว์
-JOIN Animal_Views v ON a.AnimalID = v.AnimalID -- INNER JOIN ดีกว่า LEFT JOIN ตรงนี้ เพราะสัตว์ที่ไม่เคยถูกดูก็ไม่ควรอยู่ใน top list
--- [BUG] GROUP BY แค่ AnimalID ใน MySQL ONLY_FULL_GROUP_BY mode จะ error เพราะ a.CommonName ไม่อยู่ใน GROUP BY
--- แก้ไขเป็น: GROUP BY a.AnimalID, a.CommonName
-GROUP BY a.AnimalID -- [BUG] ดู comment บรรทัดบน
-ORDER BY ViewCount DESC -- เรียงจากยอดนิยมสูงสุด ถูกต้อง
-LIMIT 5; -- top 5 พอสำหรับ recommendation section
+-- READ: แนะนำสัตว์ที่เข้าร่วมกิจกรรมบ่อยที่สุด
+-- [DATA] สัตว์ที่ฮอตที่สุด โผล่ในตาราง Show_Reference บ่อยสุด
+-- ไอตัวไหนโดนใช้งานหนักสุดก็ขึ้น Top Chart ไปเลย
+SELECT a.AnimalID, a.AnimalName, COUNT(sr.EventID) AS EventCount -- นับว่าแต่ละตัวโผล่ใน event กี่ครั้ง
+FROM Animal a
+JOIN Show_Reference sr ON a.AnimalID = sr.AnimalID -- INNER JOIN กรองเฉพาะสัตว์ที่เคยร่วมแสดง ตัวที่ไม่เคยโครงสร้าง = ไม่ติด Top Chart
+GROUP BY a.AnimalID, a.AnimalName -- GROUP BY สองตัว เพราะ ONLY_FULL_GROUP_BY บังคับเสมอ
+ORDER BY EventCount DESC, a.AnimalName ASC -- rank ตามความดังเป็นอันดับแรก ถ้า tie ก็เรียงชื่อตาม
+LIMIT 5; -- Top 5 ดาราสัตว์ประจำสวนสัตว์
 
--- READ: แนะนำสัตว์ตามสายพันธุ์ที่ผู้ใช้เคยดู — collaborative filtering แบบ manual
-SELECT DISTINCT a2.AnimalID, a2.CommonName -- DISTINCT จำเป็นเพราะ user อาจดูสัตว์สายพันธุ์เดียวกันหลายตัว ทำให้ a2 ซ้ำ
-FROM Animal_Views v -- เริ่มจาก view log ของ user
-JOIN Animal a1 ON v.AnimalID = a1.AnimalID -- หาสัตว์ที่ user เคยดู
-JOIN Animal a2 ON a1.Species = a2.Species AND a1.AnimalID != a2.AnimalID -- หาสัตว์สายพันธุ์เดียวกันที่ไม่ใช่ตัวเดิม != ใช้ได้ใน MySQL แต่ <> เป็น standard SQL มากกว่า
-WHERE v.VisitorID = ?  -- filter เฉพาะ user ที่ต้องการ
-LIMIT 5; -- top 5 recommendation ไม่มี ORDER BY เช่นกัน ได้ random 5 ตัว
+-- READ: แนะนำสัตว์สายพันธุ์เดียวกันจาก AnimalID ที่กำลังดูอยู่
+-- [LOGIC] โคตรฉลาด: เอาตัวที่กำลังดูอยู่ ไปหาสัตว์อื่นที่มี SpeciesID เดียวกัน แต่ไอดีต้องไม่ใช่ตัวมันเอง
+-- แบบว่า "คุณอาจจะสนใจตัวอื่นที่เป็นสายพันธุ์เดียวกันนะ" แหม ทรงอย่างกับเว็บขายของ
+SELECT DISTINCT a2.AnimalID, a2.AnimalName -- DISTINCT กัน duplicate ถ้า self-join ทำไม่ครบถ้วน
+FROM Animal a1
+JOIN Animal a2 ON a1.SpeciesID = a2.SpeciesID AND a1.AnimalID <> a2.AnimalID -- self-join หาสัตว์ species เดียวกัน แต่นอกจากตัวเอง ฉลาดมาก
+WHERE a1.AnimalID = ? -- ระบุตัวที่กำลังดูอยู่
+LIMIT 5; -- 5 คำแนะนำพอ ไม่ต้องยิงของ Amazon
 
--- =============================================
--- FUNCTION: ซื้อตั๋วเข้าชมออนไลน์ (Online Ticket Purchase)
--- =============================================
+-- [MIGRATION] เปลี่ยน TicketID ทื่อๆ เป็น Token สุ่ม ป้องกันพวกลองภูมิสุ่มเลขตั๋วชาวบ้าน (IDOR)
+-- ย้ำอีกรอบ! ไอพวกชอบรัน 1, 2, 3 ดูข้อมูลชาวบ้าน ต้องเจอ UUID ฟาดหน้า
+ALTER TABLE Ticket -- ตารางตั๋วหลัก กำลังจะเสริม security
+ADD COLUMN TicketToken CHAR(36) NULL; -- เพิ่ม UUID column ไว้ก่อน ให้ NULL เพราะ row เก่ายังไม่มีค่า ถ้า NOT NULL เลย migration พังคา
 
--- READ: ดึงประเภทตั๋วและราคา — query สะอาด
-SELECT TicketTypeID, TypeName, Price, Conditions  -- ครบถ้วนสำหรับ listing page ให้ user เลือกตั๋ว
-FROM TicketType  -- ตารางประเภทตั๋ว
-WHERE IsActive = TRUE; -- filter เฉพาะตั๋วที่ active ดีมาก soft-delete pattern ถูกนำมาใช้ถูกที่
+UPDATE Ticket -- เติม UUID ให้ทุก row เก่าที่ยังไม่มี token
+SET TicketToken = UUID() -- built-in UUID() ของ MySQL ใช้ได้เลย ไม่ต้องไปสร้างเอง
+WHERE TicketToken IS NULL; -- แตะเฉพาะ row ที่ยังไม่มี token ไม่เขียนทับ row ที่มีค่าแล้ว
 
--- READ: ตรวจสอบโปรโมชั่น/ส่วนลดที่ใช้ได้ — validation ครบ 3 เงื่อนไข
-SELECT PromoCode, DiscountPercent, DiscountAmount, ValidUntil  -- ดึงทั้ง % และ fixed amount เพราะ promotion อาจเป็น 2 แบบ ดี
-FROM Promotion  -- ตาราง promotion
-WHERE PromoCode = ? AND ValidUntil >= CURDATE() AND IsActive = TRUE; -- ครบ 3 เงื่อนไข: code ตรง + ยังไม่หมดอายุ + active ถ้าขาดข้อใดข้อหนึ่งจะมีช่องโหว่
+ALTER TABLE Ticket -- ตอนนี้ทุก row มีค่าแล้ว ปลอดภัยที่จะเปลี่ยนเป็น NOT NULL
+MODIFY COLUMN TicketToken CHAR(36) NOT NULL; -- แก้เป็น NOT NULL ปิดช่องโหว์ ทำหลัง UPDATE เสมอ !
 
--- CREATE: บันทึกข้อมูลตั๋วแต่ละใบ — จุดสำคัญมากแต่มี bug ซ่อนอยู่
--- [NOTE] ถ้า TicketID เป็น AUTO_INCREMENT ไม่ควรระบุใน INSERT ปล่อย DB จัดการเอง ถ้าเป็น UUID ก็ต้องส่งมาจาก application layer ตรวจ schema ก่อน
-INSERT INTO Ticket (TicketID, TicketTypeID, Price, VisitDate, PromoCode, PurchaseDate, Status) -- column list ครบดี explicit ดีกว่า INSERT แบบไม่ระบุ column
--- [BUG] Status = 'Unused' แต่ Payment section (query ด้านล่าง) ตรวจสอบด้วย Status = 'PendingPayment' ทำให้หากันไม่เจอตลอดชีวิต ต้องเลือก value เดียวและใช้ให้ consistent
-VALUES (?, ?, ?, ?, ?, NOW(), 'Unused'); -- [BUG] ดู comment บรรทัดบน
-
--- CREATE: เชื่อมตั๋วกับ Visitor (Bought_by) — ต้องทำหลัง INSERT Ticket สำเร็จเสมอ
-INSERT INTO Bought_by (VisitorID, TicketID) -- relation table เชื่อม Visitor กับ Ticket many-to-one
-VALUES (?, ?); -- [NOTE] ต้องส่ง TicketID จาก INSERT ก่อนหน้า ถ้าทำใน application layer ต้องใช้ LAST_INSERT_ID() หรือ returning ID ให้ถูกต้อง
-
--- =============================================
--- FUNCTION: ชำระเงิน (Payment Processing)
--- =============================================
-
--- READ: ดึงข้อมูลตั๋วที่ต้องชำระ — query ดีแต่หาตั๋วไม่เจอเพราะ status ไม่ตรง
-SELECT t.TicketID, tt.TypeName, t.Price, t.PromoCode -- ข้อมูลที่ต้องแสดงใน payment confirmation page
-FROM Ticket t  -- ตาราง ticket
-JOIN TicketType tt ON t.TicketTypeID = tt.TicketTypeID -- JOIN เพื่อเอา TypeName มาแสดงให้ user เห็น
--- [BUG] Ticket ถูก INSERT ด้วย Status = 'Unused' ไม่ใช่ 'PendingPayment' query นี้จะไม่เจอตั๋วใหม่เลย ต้องแก้ทั้งคู่ให้ใช้ค่าเดียวกัน
-WHERE t.TicketID = ? AND t.Status = 'PendingPayment'; -- [BUG] ดู comment บรรทัดบน
-
--- READ: ตรวจสอบสถานะการชำระเงิน — query ตรงไปตรงมา
-SELECT PaymentID, TicketID, PaymentStatus, PaymentDate  -- ข้อมูล payment ของตั๋วนั้น
-FROM Payment  -- ตาราง payment
-WHERE TicketID = ?; -- lookup ด้วย TicketID index บน TicketID จะช่วยได้มาก
-
--- UPDATE: อัปเดต PurchaseChannel และ PurchaseDate ใน Ticket — logic ดีแต่ไม่ป้องกัน double payment
-UPDATE Ticket  -- อัปเดตตาราง ticket
-SET PurchaseChannel = ?, PurchaseDate = NOW(), Status = 'Paid' -- อัปเดต 3 field พร้อมกัน PurchaseDate ใช้ NOW() ดี ไม่รับจาก user ป้องกัน time manipulation
--- [WARNING] ไม่มีการตรวจสอบ Status เดิมก่อน UPDATE ถ้า payment ถูกเรียกซ้ำ (network retry / double click) status จะถูกเขียนทับ ควรเพิ่ม AND Status != 'Paid' ป้องกัน
-WHERE TicketID = ?; -- [WARNING] ดู comment บรรทัดบน
-
--- UPDATE: เชื่อม Promotion กับ Ticket (กรณีใช้โค้ดส่วนลด) — logic นี้มีรู 3 รู
-UPDATE Ticket  -- อัปเดตตาราง ticket เพื่อใส่ promo และคำนวณราคาใหม่
--- [BUG 1] ถ้า DiscountAmount เป็น NULL (เช่น promo เป็นแบบ % เท่านั้น) Price จะกลายเป็น NULL ทันที ข้อมูลเสียหาย ควรใช้ IFNULL(DiscountAmount, 0)
--- [BUG 2] ไม่รองรับ DiscountPercent เลย ทั้งที่ดึงมาใน query ตรวจสอบ promo ด้านบน logic ไม่ครบ
--- [BUG 3] ราคาอาจติดลบได้ถ้า DiscountAmount > Price ควรใช้ GREATEST(0, Price - ...) คุมล่าง
-SET PromoCode = ?, Price = Price - (SELECT DiscountAmount FROM Promotion WHERE PromoCode = ?) -- *ปรับ Logic ตามเป้าหมายจริง -- [BUG 1,2,3] ดู comment บรรทัดบน
-WHERE TicketID = ?; -- filter ticket เดียว ถูกต้อง
+CREATE UNIQUE INDEX uq_ticket_token ON Ticket (TicketToken); -- UNIQUE INDEX บังคับ token ไม่ซ้ำกัน และ WHERE ตาม token ก็เร็วด้วย
 
 -- =============================================
--- FUNCTION: จัดการตั๋วและประวัติการซื้อ (Ticket Management)
+-- FUNCTION: ซื้อตั๋วเข้าชมออนไลน์
 -- =============================================
 
--- READ: ดึงตั๋วทั้งหมดของ Visitor — query สะอาด
-SELECT t.TicketID, tt.TypeName, t.VisitDate, t.Status  -- ข้อมูลพอสำหรับ ticket list view
-FROM Ticket t  -- ตาราง ticket
-JOIN Bought_by bb ON t.TicketID = bb.TicketID -- JOIN ผ่าน relation table หา VisitorID
-WHERE bb.VisitorID = ?; -- filter ด้วย visitor ID
+-- READ: ดึงประเภทตั๋วที่เคยมีในระบบ
+-- [DESIGN] ไม่มีตาราง TicketType งั้นก็ดึง Distinct มาจากที่เคยขายไปเลย
+-- ซกมกไปหน่อย แต่ทำไงได้ ก็ Schema เอ็งไม่มีตาราง Master ให้ใช้นี่หว่า
+SELECT DISTINCT TicketType -- dedup ประเภทตั๋ว เพราะ schema ไม่มีตาราง master TicketType แยก ซกมกแต่ทำไงได้
+FROM Ticket
+ORDER BY TicketType ASC; -- เรียง A-Z เพื่อ UX dropdown พื้นฐานที่มนุษย์คาดหวัง
 
--- READ: แสดงรายละเอียดตั๋วพร้อมสถานะ (ใช้แล้ว/ยังไม่ใช้) — ดึง UsedDate ด้วย
-SELECT t.TicketID, tt.TypeName, t.VisitDate, t.Price, t.Status, t.UsedDate  -- ดึง UsedDate ด้วยดี ทำให้รู้ว่าตั๋วนี้ถูกใช้เมื่อไหร่
-FROM Ticket t  -- ตาราง ticket
-JOIN TicketType tt ON t.TicketTypeID = tt.TicketTypeID -- JOIN เพื่อ TypeName
-WHERE t.TicketID = ?; -- lookup ตั๋วใบเดียว primary key เร็วสุด
+-- READ: ตรวจสอบโปรโมชั่น/ส่วนลดที่ใช้ได้
+-- ต้องยังไม่หมดอายุและรหัสตรง
+-- โค้ดหมดอายุไปแล้วก็คือจบ ห้ามโวยวาย
+SELECT PromotionID, PromotionCode, DiscountAmount, Conditions, PromotionExpireDate -- ดึงรายละเอียดโปโมชั่นสดๆ เอาไปให้ Frontend โชว์เอง
+FROM Promotion
+WHERE PromotionCode = ? AND PromotionExpireDate >= NOW(); -- ตรวจโค้ดและวันหมดอายุพร้อมกัน single query จบ โค้ดหมดอายุก็คือจบ อย่าโวยวาย
 
--- READ: ดูประวัติการซื้อเรียงตามวันที่ — history view ที่ดี
-SELECT t.TicketID, tt.TypeName, t.PurchaseDate, t.Price  -- ข้อมูล purchase history ครบ
-FROM Ticket t  -- ตาราง ticket
-JOIN Bought_by bb ON t.TicketID = bb.TicketID -- JOIN ผ่าน relation table
-WHERE bb.VisitorID = ?  -- filter ด้วย visitor
-ORDER BY t.PurchaseDate DESC; -- ล่าสุดก่อน เหมาะสำหรับ history view ถูกต้อง
+-- CREATE: สร้างรายการตั๋ว/คำสั่งซื้อ
+-- [SECURITY] ยัด UUID() ใส่ TicketToken ไว้เลยตอนสร้างตั๋ว
+-- ข้อมูลที่เหลือปล่อย NULL ไว้นั่นแหละ จ่ายเงินเมื่อไหร่ค่อยมาอัปเดต
+INSERT INTO Ticket (VisitorID, PromotionID, TicketType, VisitDate, TicketExpireDate, PurchaseChannel, PurchaseDate, Price, TicketToken) -- ยัดทุก field เข้าเลยสักครั้ง
+VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, UUID()); -- PurchaseChannel กับ PurchaseDate เป็น NULL แน่นอน รอจ่ายเงินค่อยมาอัปเดต | UUID() สร้าง token อัตโนมัติ
+
+-- READ: แสดงรายละเอียดคำสั่งซื้อที่เพิ่งสร้าง
+-- [FINANCE] ไม่ทำลายราคาตั้งต้น! โชว์ Original Price ควบคู่กับ Discount แล้วคำนวณ NetPrice สดๆ ผ่าน GREATEST ป้องกันยอดติดลบ
+-- ใครเอา Price = Price - Discount ไปอัปเดตทับของเดิม ขอให้โดนฝ่ายบัญชีตามกระทืบ
+SELECT t.TicketID, t.TicketToken, t.VisitorID, t.PromotionID, t.TicketType, t.VisitDate, t.TicketExpireDate, -- ข้อมูลหลักตั๋วที่เพิ่งสร้าง
+       t.Price AS OriginalPrice, -- เก็บราคาตั้งต้นไว้เสมอ ห้ามถูกลบทับ
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ถ้าไม่มี promo discount = 0 ไม่ใช่ NULL เพราะ Frontend จะเอา NULL ไปบวกไม่ได้
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice -- GREATEST(0,...) กันยอดติดลบ เผื่อ discount มั่วเกินราคา
+FROM Ticket t
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT เพราะตั๋วอาจไม่มีโปโมชั่นก็ต้องออกมา
+WHERE t.TicketID = ?; -- ดึงตั๋วที่เพิ่งสร้าง เอาไปโชว์หน้า confirmation
 
 -- =============================================
--- FUNCTION: แสดงตั๋วอิเล็กทรอนิกส์ (E-Ticket Viewing)
+-- FUNCTION: ชำระเงิน
 -- =============================================
 
--- READ: ดึงข้อมูลตั๋วจาก TicketID — query เบาสำหรับ quick lookup
-SELECT TicketID, VisitDate, Status, QR_Code_Data  -- ข้อมูลสำหรับ render E-Ticket โดยเฉพาะ QR_Code_Data ที่ใช้สแกนเข้างาน
-FROM Ticket  -- ตาราง ticket
-WHERE TicketID = ?; -- lookup ด้วย primary key เร็วสุด
+-- READ: ดึงข้อมูลตั๋วที่ต้องชำระ
+-- เช็กว่า PurchaseDate เป็น NULL แปลว่ายังไม่จ่ายเงินชัวร์ๆ
+-- ดึงมากางให้ดูว่าต้องจ่ายเท่าไหร่ อย่าเบี้ยว
+SELECT t.TicketID, t.TicketToken, t.VisitorID, t.PromotionID, t.TicketType, t.VisitDate, t.TicketExpireDate, t.PurchaseChannel, t.PurchaseDate, -- ข้อมูลตั๋วครบทุกอย่าง
+       t.Price AS OriginalPrice, -- ราคาดิบก่อนลด
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ส่วนลด default 0
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice, -- ราคาสุทธิ์ ห้ามติดลบ
+       CASE
+           WHEN t.PurchaseDate IS NULL THEN 'PendingPayment' -- NULL คือยังไม่จ่าย
+           ELSE 'Paid' -- มีค่า คือจ่ายแล้ว
+       END AS PaymentStatus -- derive สถานะจาก Nullability ล้วนๆ
+FROM Ticket t
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT เผื่อตั๋วไม่มีโปโมชั่น
 
--- READ: ดึงข้อมูล Visitor เจ้าของตั๋ว — ดึงเฉพาะที่ต้องแสดง ไม่ leak ข้อมูล sensitive
-SELECT v.FirstName, v.LastName, v.VisitorEmail  -- ไม่ดึง password หรือข้อมูล sensitive อื่นๆ ถูกต้อง
-FROM Visitor v  -- ตาราง visitor
-JOIN Bought_by bb ON v.VisitorID = bb.VisitorID -- JOIN ผ่าน relation table เพื่อ map ticket → visitor
-WHERE bb.TicketID = ?; -- หา visitor จาก ticket ID
+WHERE t.TicketID = ? AND t.PurchaseDate IS NULL; -- เฉพาะที่ยังค้างชำระ ถ้าจ่ายแล้ว query นี้จะออก empty เลย
 
--- READ: ดึงข้อมูล Promotion ที่ใช้กับตั๋วนี้ — INNER JOIN ทำให้ตั๋วไม่มี promo หายไป
-SELECT p.PromoCode, p.PromoName, p.DiscountPercent  -- ข้อมูล promo ที่ใช้กับตั๋วนี้
-FROM Promotion p  -- ตาราง promotion
-JOIN Ticket t ON p.PromoCode = t.PromoCode -- [NOTE] INNER JOIN ทำให้ query นี้ return 0 row สำหรับตั๋วที่ไม่มี promo ถ้า application ไม่รับมือ จะดูเหมือน error ทั้งที่ไม่ใช่ ควรเป็น LEFT JOIN ให้ตั๋วหลักแสดงเสมอ
-WHERE t.TicketID = ?; -- [NOTE] ดู comment บรรทัดบน
+-- READ: ตรวจสอบสถานะการชำระเงิน
+-- Derive สถานะแบบ on-the-fly จาก Nullability ของ PurchaseDate ล้วนๆ
+-- ขี้เกียจสร้างตาราง Payment แยก ก็เช็กมันจากตรงนี้แหละ ง่ายดี
+SELECT TicketID, PurchaseDate, -- ไม่ต้อง JOIN จัด เช็คสถานะจ่ายเงินดูแค่ column เดียว
+       CASE
+           WHEN PurchaseDate IS NULL THEN 'PendingPayment' -- NULL = ยังค้างอยู่
+           ELSE 'Paid' -- มีค่า = จ่ายไปแล้ว ไม่ต้องสร้างตาราง Payment แยกให้เปลือง DB
+       END AS PaymentStatus -- derive สถานะจ่ายเงินแบบ lazy แต่ผลไม่ต่างกัน
+FROM Ticket
+WHERE TicketID = ?; -- ระบุ ticket เดียว
 
--- READ: แสดงรายละเอียดครบถ้วนสำหรับ E-Ticket — master query ดึงรอบเดียวได้เลย
-SELECT  -- ดีมากที่รวม query ไว้รอบเดียวแทนที่จะ query แยก 3-4 ครั้ง latency ต่ำกว่าเยอะ
-    t.TicketID, tt.TypeName, t.VisitDate, t.Price, t.Status, t.QR_Code_Data, -- ข้อมูลตั๋วครบ
-    v.FirstName, v.LastName, -- ชื่อ-นามสกุลเจ้าของตั๋ว
-    p.PromoName -- ชื่อ promo (NULL ถ้าไม่มี promo เพราะ LEFT JOIN ด้านล่าง)
-FROM Ticket t  -- ตาราง ticket เป็น base ทุกอย่าง JOIN เข้ามา
-JOIN TicketType tt ON t.TicketTypeID = tt.TicketTypeID -- JOIN หา TypeName ถ้า TicketTypeID orphan ตั๋วจะหายไป ควรตรวจ FK constraint
-JOIN Bought_by bb ON t.TicketID = bb.TicketID -- JOIN หา VisitorID
-JOIN Visitor v ON bb.VisitorID = v.VisitorID -- JOIN หาข้อมูล visitor
-LEFT JOIN Promotion p ON t.PromoCode = p.PromoCode -- LEFT JOIN ถูกต้อง ตั๋วที่ไม่มี promo ก็ยังแสดงได้ p.PromoName จะเป็น NULL
-WHERE t.TicketID = ?; -- lookup ตั๋วใบเดียว query นี้ครบที่สุดในไฟล์
+-- UPDATE: อัปเดตข้อมูลการชำระเงินสำเร็จ
+-- [CONCURRENCY] เช็ก 'AND PurchaseDate IS NULL' ก่อน Update เสมอ ป้องกันการยิง Request ซ้ำ (Double Payment)
+-- กันไอ้พวกมือบอนกดจ่ายรัวๆ สองสามรอบ
+UPDATE Ticket
+SET PurchaseChannel = ?, PurchaseDate = NOW() -- บันทึกช่องทางชำระและ timestamp ที่จ่ายจริง อย่าใช้เวลาจาก Frontend เดี๋ยว
+WHERE TicketID = ? AND PurchaseDate IS NULL; -- idempotent! AND IS NULL ทำให้ double-click จ่ายซ้ำไม่ได้ผล
+
+-- UPDATE: เชื่อม Promotion กับ Ticket และหักส่วนลด
+-- [FINANCE] แค่ผูก PromotionID พอ! ไม่ต้องไปลบ Price ของเดิมทิ้ง เดี๋ยวบัญชีด่า
+-- ล็อกด้วยว่าต้องยังไม่หมดอายุ และตั๋วยังไม่ถูกจ่ายเงิน จะได้ไม่มั่ว
+UPDATE Ticket t
+JOIN Promotion p ON p.PromotionCode = ? -- JOIN หา promotion จากโค้ดที่ผู้ใช้กรอก
+SET t.PromotionID = p.PromotionID -- ผูก PromotionID เข้าตั๋วเลย ไม่ต้องไปลบราคาเดิมทิ้งให้ฝ่ายบัญชีด่า
+WHERE t.TicketID = ? AND t.PurchaseDate IS NULL AND p.PromotionExpireDate >= NOW(); -- 3 เงื่อนไขป้องกันการโกง: ticket ถูก, ยังไม่จ่าย, โค้ดยังใช้ได้
+
+-- =============================================
+-- FUNCTION: จัดการตั๋วและประวัติการซื้อ
+-- =============================================
+
+-- READ: ดึงตั๋วทั้งหมดของ Visitor
+-- สังเกตการคัดแยก Status: 1.ยังไม่จ่าย 2.หมดอายุ 3.ยังใช้ได้
+-- พี่แกแยก Case กันยิบย่อยมาก แต่โคตรตอบโจทย์ UI
+SELECT t.TicketID, t.TicketToken, t.TicketType, t.VisitDate, t.PurchaseDate, -- field หลักสำหรับ list ตั๋วทุกใบของ Visitor
+       t.Price AS OriginalPrice, -- ราคาดิบก่อนลด เก็บไว้เสมอ
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ส่วนลด default 0 ถ้าไม่มีโปโมชั่น
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice, -- ราคาสุทธิ์ ห้ามติดลบ
+       CASE
+           WHEN t.PurchaseDate IS NULL THEN 'PendingPayment' -- ยังไม่จ่ายเงิน
+           WHEN t.TicketExpireDate IS NOT NULL AND t.TicketExpireDate < NOW() THEN 'Expired' -- จ่ายแล้วแต่หมดอายุแล้ว ใช้เข้าไม่ได้แล้ว
+           ELSE 'Valid' -- จ่ายแล้วและยังใช้ได้อยู่
+       END AS TicketStatus -- 3-state สถานะ machine ที่ derive จากวันที่เมื่อยู่ใน DB ไม่ต้องมี column status แยก
+FROM Ticket t
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT สำหรับตั๋วที่ไม่มีโปโมชั่นก็ต้องออกมาด้วย
+WHERE t.VisitorID = ?; -- list ตั๋วทุกใบของ Visitor คนนี้ ทั้งที่จ่ายแล้วและยังค้างอยู่
+
+-- READ: แสดงรายละเอียดตั๋วพร้อมสถานะ
+-- ดึงข้อมูลเต็มมาโชว์หน้า detail ตั๋ว
+-- ยัด VisitorID เข้าไปใน WHERE ด้วย กันไอพวกชอบแอบดูของคนอื่น
+SELECT t.TicketID, t.TicketToken, t.TicketType, t.VisitDate, t.TicketExpireDate, -- ข้อมูลหลักตั๋ว
+       t.Price AS OriginalPrice, -- ราคาตั้งต้น
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ส่วนลด
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice, -- ราคาสุทธิ์
+       t.PurchaseChannel, t.PurchaseDate, -- ช่องทางและวันที่จ่าย
+       CASE
+           WHEN t.PurchaseDate IS NULL THEN 'PendingPayment' -- ยังไม่จ่าย
+           WHEN t.TicketExpireDate IS NOT NULL AND t.TicketExpireDate < NOW() THEN 'Expired' -- หมดอายุแล้ว
+           ELSE 'Valid' -- ยังใช้ได้อยู่
+       END AS TicketStatus, -- 3-state derive จากวันที่ ไม่ต้องสร้าง column status หลอก DB
+       p.PromotionCode -- โค้ดโปโมชั่นถ้ามี ถ้าไม่มีก็เป็น NULL ไม่เป็นไร
+FROM Ticket t
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT เพราะตั๋วที่ไม่ใช้โปโมชั่นก็ต้องออกมาแสดงด้วย
+WHERE t.TicketID = ? AND t.VisitorID = ?; -- ต้อง match ทั้ง ticket และ visitor กันคนอื่นแอบเข้าหน้าดูตั๋วของชาวบ้าน
+
+-- READ: ดูประวัติการซื้อเรียงตามวันที่
+-- List history ตั๋วที่จ่ายเงินแล้ว (PurchaseDate IS NOT NULL) เรียงจากใหม่ไปเก่า
+-- คนรวยๆ เค้าชอบดูประวัติการเปย์กัน
+SELECT t.TicketID, t.TicketToken, t.TicketType, t.PurchaseDate, -- field สำหรับหน้า purchase history
+       t.Price AS OriginalPrice, -- เก็บราคาดิบ
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ส่วนลดที่ได้
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice -- ที่จ่ายจริง คนรวยๆ ชอบดูประวัติการเปยกัน
+FROM Ticket t
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT เพราะบางใบไม่มีโปโมชั่นก็ต้องติดประวัติไว้ด้วย
+WHERE t.VisitorID = ? AND t.PurchaseDate IS NOT NULL -- เฉพาะที่จ่ายเงินแล้วเท่านั้น pending ไม่เอามาปน
+ORDER BY t.PurchaseDate DESC; -- ล่าสุดขึ้นก่อน คนชอบดูการซื้อล่าสุดเสมอ
+
+-- =============================================
+-- FUNCTION: แสดงตั๋วอิเล็กทรอนิกส์
+-- =============================================
+
+-- READ: ดึงข้อมูลตั๋วจาก TicketToken
+-- [SECURITY] ตรงนี้แหละของจริง ใช้ TicketToken เป็นคีย์หลักกัน IDOR ยืนยันว่าคนนอกสุ่มเลขไม่เจอแน่
+-- ถ้ามันยังเดา Token 36 ตัวอักษรถูกก็ปล่อยมันเข้าสวนสัตว์ฟรีไปเถอะ
+SELECT t.TicketID, t.TicketToken AS TicketCode, t.TicketType, t.VisitDate, t.TicketExpireDate, -- TicketToken เป็น TicketCode ที่ใช้เป็น QR code
+       t.Price AS OriginalPrice, -- ราคาตั้งต้น
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ส่วนลด
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice, -- ราคาสุทธิ์
+       t.PurchaseChannel, t.PurchaseDate -- ช่องทางและวันจ่าย
+FROM Ticket t
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT เผื่อตั๋วที่ไม่ใช้โปโมชั่นจะได้ออกมา NULL
+WHERE t.TicketToken = ? AND t.PurchaseDate IS NOT NULL; -- Token-based access กัน IDOR + ต้องจ่ายแล้วเท่านั้น
+
+-- READ: ดึงข้อมูล Visitor เจ้าของตั๋วจาก TicketToken
+-- ดึงเฉพาะคนที่ซื้อตั๋วใบนี้จาก Token
+-- ตรวจดูว่าใครคือเจ้าของตัวจริง จะได้เอาไปด่าถูกคน
+SELECT v.VisitorFName, v.VisitorLName, v.VisitorEmail -- แค่ชื่อกับอีเมล ไม่ดึงข้อมูลส่วนตัวเกินจำเป็น privacy ขั้นพื้นฐาน
+FROM Visitor v
+JOIN Ticket t ON v.VisitorID = t.VisitorID -- JOIN ผ่าน ticket เพื่อยืนยันความเป็นเจ้าของ คนอื่นเอา Token อีกคนไปเอาข้อมูลคนอื่นไม่ได้
+WHERE t.TicketToken = ? AND t.PurchaseDate IS NOT NULL; -- Token ยืนยันตัวตน + ต้องจ่ายแล้วเท่านั้น
+
+-- READ: ดึงข้อมูล Promotion ที่ใช้กับตั๋วนี้จาก TicketToken
+-- หาโปรโมชั่นที่ผูกกับตั๋วใบนี้
+-- เผื่อมันอยากรู้ว่าตอนซื้อใช้โค้ดอะไรลดไป
+SELECT p.PromotionCode, p.DiscountAmount, p.Conditions -- โค้ด, ส่วนลด, เงื่อนไขล์ ฮีโรไครจะมาโต้อกว่าใช้ไม่ได้ดูตรงนี้
+FROM Ticket t
+LEFT JOIN Promotion p ON p.PromotionID = t.PromotionID -- LEFT เผื่อตั๋วที่ไม่มีโปโมชั่นจะได้ออกมา NULL ดีกว่าหาย
+WHERE t.TicketToken = ? AND t.PurchaseDate IS NOT NULL; -- Token ยืนยันตัวตน + จ่ายแล้ว
+
+-- READ: แสดงรายละเอียดครบถ้วนสำหรับ E-Ticket จาก TicketToken
+-- Master Query! ดึงทีเดียวครบทุกอย่างทั้งตั๋ว ลูกค้า โปรโมชั่น แถมคำนวณ NetPrice ให้เสร็จสรรพ
+-- อลังการงานสร้าง ยัดข้ามไป 3 ตารางเพื่อรวมทุกอย่างมาส่งให้หน้า E-Ticket โชว์คิวอาร์โค้ดหล่อๆ
+SELECT t.TicketID, t.TicketToken AS TicketCode, t.TicketType, t.VisitDate, t.TicketExpireDate, -- TicketCode เอาไปเป็น QR code หน้าตั๋ว
+       t.Price AS OriginalPrice, -- ราคาตั้งต้น
+       IFNULL(p.DiscountAmount, 0) AS DiscountAmount, -- ส่วนลด
+       GREATEST(0, t.Price - IFNULL(p.DiscountAmount, 0)) AS NetPrice, -- ราคาสุทธิ์ ห้ามติดลบ
+       t.PurchaseChannel, t.PurchaseDate, -- ช่องทางและวันที่จ่าย
+       v.VisitorFName, v.VisitorLName, v.VisitorEmail, -- ข้อมูลเจ้าของตั๋วสำหรับส่งอีเมล E-ticket
+       p.PromotionCode -- โค้ดโปโมชั่น NULL ถ้าไม่ใช้
+FROM Ticket t
+JOIN Visitor v ON t.VisitorID = v.VisitorID -- INNER JOIN เพราะตั๋วต้องมีเจ้าของเสมอ ถ้าไม่มีคนชื่อแสดงถือว่ามีปัญหา DB
+LEFT JOIN Promotion p ON t.PromotionID = p.PromotionID -- LEFT เผื่อตั๋วที่ไม่มีโปโมชั่นจะได้ออกมาด้วย PromotionCode เป็น NULL
+WHERE t.TicketToken = ? AND t.PurchaseDate IS NOT NULL; -- Master E-Ticket Query: Token-based กัน IDOR + จ่ายแล้วเท่านั้น เอาทุกอย่างให้ E-Ticket หล่อๆ query เดียวจบ
