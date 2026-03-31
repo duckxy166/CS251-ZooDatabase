@@ -1,8 +1,210 @@
 -- =============================================
--- FUNCTION: สมัครสมาชิกและจัดการบัญชีผู้ใช้งาน
+-- SCHEMA: สร้างโครงสร้างฐานข้อมูลสวนสัตว์
 -- =============================================
 
--- [MIGRATION] บังคับ Password เก็บเป็น Hash เท่านั้น VARCHAR(255) กว้างพอรองรับ bcrypt/argon2
+ -- [DDL] สร้างจากตารางแม่ไปตารางลูกก่อน ไม่งั้น Foreign Key จะลุกขึ้นมาตบหน้าเอาตอนรัน
+ -- [NOTE] เลขในวงเล็บหลัง INT เป็นแค่ display width แบบ MySQL รุ่นเก่า ไม่ได้ทำให้คอลัมน์เทพขึ้น อย่าเผลออินเกินจริง
+ -- เอกสารบางจุดให้ขนาด FK ไม่เท่าตารางแม่ ผมจับให้ตรงฝั่งที่ถูกอ้างอิงไว้ก่อน จะได้ไม่ต้องมานั่งด่า constraint ตอนตีสอง
+
+ -- ---------------------------------------------
+ -- ตารางหลัก
+ -- ---------------------------------------------
+
+ -- DDL: สร้างตารางสายพันธุ์
+ -- ตัวนี้ไม่พึ่งใคร เริ่มจากมันก่อนตามมารยาทของคนไม่อยากเจอ Error โง่ๆ
+ CREATE TABLE Species ( -- แม่พันธุ์ของข้อมูลสัตว์ทั้งระบบ ถ้าตารางนี้พัง ข้างล่างก็เดินต่อไม่ได้
+     SpeciesID INT(5) NOT NULL AUTO_INCREMENT, -- PK แจกเลขเอง จะได้ไม่ต้องนั่งเดา ID แบบคนว่างงาน
+     SpeciesName VARCHAR(30) NOT NULL, -- ชื่อสายพันธุ์ไว้ให้มนุษย์อ่าน ไม่ใช่ให้มองภาษาละตินจนตาแหก
+     TaxonomyCategory VARCHAR(50) NOT NULL, -- หมวดอนุกรมวิธาน เอาไว้จัดกลุ่มให้ข้อมูลดูมีการศึกษาหน่อย
+     Origin VARCHAR(50) NOT NULL, -- ถิ่นกำเนิดของสายพันธุ์ จะได้เลิกเดาส่งๆ ว่ามาจากไหน
+     AverageLifespan INT(3) NOT NULL, -- อายุเฉลี่ยเป็นปีตรงๆ บ้านๆ แต่ใช้งานจริง ไม่ต้องทำเป็นล้ำ
+     ScientificName VARCHAR(50) NOT NULL, -- ชื่อวิทยาศาสตร์ของจริง เอาไว้กันชื่อเล่นมั่วจนวิชาการร้องไห้
+     ConservationStatus ENUM('Least Concren', 'Near Threatened', 'Vulnerable', 'Endangered', 'Critically Endangered') NOT NULL, -- สะกดตามเอกสารเป๊ะ แม้คำแรกจะดูเหมือนคีย์บอร์ดลื่นก็เถอะ
+     PRIMARY KEY (SpeciesID) -- เสาหลักของตารางนี้ ไม่มีมันทุก FK จะกลายเป็นมุกแป้ก
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- InnoDB รับ FK ได้จริง ส่วน utf8mb4 กันภาษาไทยพังยับ
+
+ -- DDL: สร้างตารางโซน
+ -- โซนคือบ้านใหญ่ของกรงและกิจกรรม ใครสร้างทีหลังแล้ว FK พัง ก็สมควรโดน DB สั่งสอน
+ CREATE TABLE Zone ( -- ตารางโซนของสวนสัตว์ เอาไว้บอกว่าสัตว์ไม่ได้เดินมั่วทั่วแผนที่
+     ZoneID INT(5) NOT NULL AUTO_INCREMENT, -- PK ของโซน แจกเลขเองให้จบ ไม่ต้องมานั่งนิ้ว
+     ZoneName VARCHAR(30) NOT NULL, -- ชื่อโซนแบบที่คนอ่านแล้วพอรู้เรื่อง
+     ZoneDescrip VARCHAR(50) NOT NULL, -- คำอธิบายสั้นๆ ของโซน เอาไว้กัน Front ต้องมโนเอาเอง
+     ZoneType VARCHAR(30) NOT NULL, -- ประเภทโซน เผื่อวันหนึ่งอยาก filter แบบไม่ใช้ความรู้สึก
+     PRIMARY KEY (ZoneID) -- หลักยึดของ Enclosure, EventSchedule และ Assigned_To ทั้งกอง
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- โครงสร้างแม่อีกตัวของระบบ อย่าทำหล่น
+
+ -- DDL: สร้างตารางเจ้าหน้าที่
+ -- ฝั่งคนทำงานก็ต้องมี master table ของมันเอง ไม่ใช่เอารายชื่อไปปะใน Excel แล้วเรียกว่าระบบ
+ CREATE TABLE Admin ( -- ตารางเจ้าหน้าที่สวนสัตว์ เก็บตัวจริงของคนที่มาจัดการหลังบ้าน
+     AdminID INT(5) NOT NULL AUTO_INCREMENT, -- PK ของเจ้าหน้าที่ เอาไว้ให้ตารางลูกมาเกาะอย่างมีระเบียบ
+     FirstName VARCHAR(30) NOT NULL, -- ชื่อจริง ไม่ใช่นามแฝงในกลุ่มไลน์
+     Surname VARCHAR(30) NOT NULL, -- นามสกุล เอาไว้แยกคนชื่อซ้ำไม่ให้ปั่นหัว HR
+     Email VARCHAR(50) NOT NULL, -- อีเมลทำงาน ใช้ติดต่อและกันข้อมูลซ้ำแบบคนมีระบบ
+     Salary INT(6) NOT NULL, -- เงินเดือน เก็บเป็นจำนวนเต็มไปก่อน ชีวิตยังไม่ต้องดราม่าเรื่องสตางค์
+     address VARCHAR(100) NOT NULL, -- ที่อยู่ตามเอกสาร ใช้ตัวพิมพ์เล็กไปเลย จะได้รู้ว่าเอกสารต้นทางมีชีวิตจิตใจ
+     HireDate DATE NOT NULL, -- วันที่เริ่มงาน เอาไว้ตามประวัติว่าอยู่มาก่อนใครบ้าง
+     PRIMARY KEY (AdminID), -- ตัวชี้ขาดว่า Admin คนไหนเป็นใคร
+     UNIQUE KEY uq_admin_email (Email) -- อีเมลห้ามซ้ำ ไม่งั้นเดี๋ยว HR ได้ปวดหัวฟรี
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางคนทำงาน จะใช้ FK ต่ออีกหลายจุด ห้ามพลาด
+
+ -- DDL: สร้างตารางโปรโมชั่น
+ -- โค้ดลดราคาถ้าไม่แยกเป็นตารางก็เตรียมดู logic เละเป็นโจ๊กใน application layer ได้เลย
+ CREATE TABLE Promotion ( -- ตารางโปรโมชั่น เก็บส่วนลดให้เป็นเรื่องเป็นราว ไม่ใช่ hardcode ในโค้ดจนเหม็นไหม้
+     PromotionID INT(4) NOT NULL AUTO_INCREMENT, -- PK ของโปรโมชั่น เล็กหน่อยแต่พอ ไม่ต้องทำใหญ่เกินฝัน
+     PromotionCode VARCHAR(20) NOT NULL, -- โค้ดที่ผู้ใช้พิมพ์ใส่มา ถ้าซ้ำกันก็เตรียมงงกันทั้งบริษัท
+     DiscountAmount DECIMAL(7,2) NOT NULL, -- จำนวนเงินที่ลด เก็บทศนิยมเผื่อวันหนึ่งอยากเล่น 99.99
+     Conditions VARCHAR(255) NOT NULL, -- เงื่อนไขการใช้สิทธิ์ เขียนไว้ให้ครบ ไม่ใช่ให้ลูกค้าเดาเอาเอง
+     PromotionExpireDate DATETIME NOT NULL, -- วันหมดอายุของโปร อย่าปล่อยโปรตายแล้วยังใช้งานได้ เดี๋ยวการเงินจะมองแรง
+     PRIMARY KEY (PromotionID), -- ตัวตั้งต้นของ FK จาก Ticket
+     UNIQUE KEY uq_promotion_code (PromotionCode) -- โค้ดโปรห้ามชนกัน ไม่งั้นตีกันแน่
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางนี้ดูเรียบๆ แต่พลาดทีเรื่องเงินล้วนๆ
+
+ -- DDL: สร้างตารางผู้เข้าชม
+ -- ฝั่งลูกค้าก็ต้องมี master table ของจริง ไม่ใช่ปล่อยข้อมูลลอยเป็นผีตาม transaction
+ CREATE TABLE Visitor ( -- ตารางผู้เข้าชม เก็บตัวตนของคนที่เข้ามาใช้ระบบและซื้อตั๋ว
+     VisitorID INT(10) NOT NULL AUTO_INCREMENT, -- PK ของผู้เข้าชม ใช้ INT ยาวหน่อยเพราะคนมาเที่ยวไม่ใช่มีสิบคน
+     VisitorFName VARCHAR(30) NOT NULL, -- ชื่อจริงของผู้เข้าชม
+     VisitorLName VARCHAR(30) NOT NULL, -- นามสกุลของผู้เข้าชม
+     VisitorDateOfBirth DATE NOT NULL, -- วันเกิด เอาไว้ใช้กับเงื่อนไขอายุถ้าระบบโตขึ้น
+     VisitorTel VARCHAR(10) NOT NULL, -- เบอร์โทรตามเอกสาร เก็บ 10 หลักแบบบ้านๆ ไปก่อน
+     VisitorEmail VARCHAR(50) NOT NULL, -- อีเมลใช้สมัครและติดต่อ คนละคนห้ามชนกัน
+     PRIMARY KEY (VisitorID), -- ตัวจริงของ visitor ทั้งระบบ
+     UNIQUE KEY uq_visitor_email (VisitorEmail) -- อีเมลไม่ unique คือเปิดประตูให้ข้อมูลซ้ำเดินเข้ามาเอง
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางแม่ของ UserAccount และ Ticket อย่าทำล้ม
+
+ -- ---------------------------------------------
+ -- ตารางที่มีความสัมพันธ์ต่อจากตารางหลัก
+ -- ---------------------------------------------
+
+ -- DDL: สร้างตารางกรงหรือพื้นที่จัดแสดง
+ -- กรงต้องเกิดหลังโซน ไม่งั้น FK จะถามหามารดาเอาได้
+ CREATE TABLE Enclosure ( -- ตารางกรงหรือพื้นที่จัดแสดง เป็นลูกของ Zone แบบตรงไปตรงมา
+     EnclosureID INT(5) NOT NULL AUTO_INCREMENT, -- PK ของกรง ใช้ผูกสัตว์ทีหลังแบบไม่ต้องใช้ชื่อโซนมานั่งเดา
+     ZoneID INT(5) NOT NULL, -- FK ไปหา Zone ตรงๆ เพราะกรงต้องสังกัดโซน ไม่ใช่เร่ร่อน
+     EnType ENUM('Indoor', 'Outdoor', 'Aquatic') NOT NULL, -- ประเภทกรง เอาไว้ให้ระบบรู้ว่าสัตว์ไม่ได้อยู่ผิดสภาพแวดล้อม
+     Status ENUM('พร้อมใช้งาน', 'กำลังปรับปรุง', 'ปิดใช้งาน') NOT NULL, -- สถานะกรง จะได้รู้ว่ากรงไหนใช้ได้ กรงไหนแตะแล้วเจ็บ
+     Capacity INT(2) NOT NULL, -- ความจุของกรง เก็บตรงๆ อย่ามโนว่ากรงเล็กจะอัดสัตว์ได้ไม่จำกัด
+     PRIMARY KEY (EnclosureID), -- ตัวระบุตารางลูกของกรง
+     CONSTRAINT fk_enclosure_zone FOREIGN KEY (ZoneID) REFERENCES Zone (ZoneID) -- กรงทุกกรงต้องมีโซนแม่ ไม่งั้นข้อมูลลอย
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางลูกตัวแรก เอาให้ถูกตั้งแต่ต้นจะได้ไม่เสียเวลาไล่ซ่อม
+
+ -- DDL: สร้างตารางสัตว์
+ -- ตารางนี้เกาะทั้ง Species และ Enclosure แถมยัง self-reference พ่อแม่อีก ถ้าพิมพ์ FK พลาดก็สมควรเจ็บ
+ CREATE TABLE Animal ( -- ตารางสัตว์ ตัวเอกของระบบที่มีสายเลือด บ้าน และสายพันธุ์ครบถ้วน
+     AnimalID INT(5) NOT NULL AUTO_INCREMENT, -- PK ของสัตว์ เอาไว้ให้ตารางอื่นอ้างแบบไม่ต้องเรียกชื่อเล่น
+     AnimalName VARCHAR(30) NOT NULL, -- ชื่อของสัตว์ เอาไว้ให้คนจำได้โดยไม่ต้องท่องรหัส
+     Gender ENUM('Male', 'Female') NOT NULL, -- เพศตามเอกสาร ตรงไปตรงมาแบบไม่ต้องพูดเยอะ
+     BirthDate DATE NOT NULL, -- วันเกิดของสัตว์ มีไว้คำนวณอายุและทำประวัติให้เป็นเรื่องเป็นราว
+     ArrivalDate TIMESTAMP NOT NULL, -- วันเวลาที่เข้าระบบหรือเข้าสวนสัตว์ จะได้ตาม timeline ถูก
+     FatherID INT(5) NULL, -- FK พ่อ ปล่อย NULL ได้เพราะโลกจริงไม่ได้รู้ประวัติครอบครัวทุกตัว
+     MotherID INT(5) NULL, -- FK แม่ ก็ NULL ได้เหมือนกัน ไม่ต้องฝืนทำเป็นรู้ทุกอย่าง
+     SpeciesID INT(5) NOT NULL, -- FK ไป Species เพราะสัตว์ต้องมีสายพันธุ์ ไม่ใช่สิ่งมีชีวิตลึกลับ
+     EnclosureID INT(5) NOT NULL, -- FK ไป Enclosure เพราะสุดท้ายมันต้องมีที่อยู่ ไม่ใช่ปล่อยเดินมั่ว
+     PRIMARY KEY (AnimalID), -- ตัวหลักของตารางสัตว์
+     CONSTRAINT fk_animal_father FOREIGN KEY (FatherID) REFERENCES Animal (AnimalID), -- self FK หาพ่อจากตารางเดียวกัน ฉลาดแต่ต้องพิมพ์ให้ถูก
+     CONSTRAINT fk_animal_mother FOREIGN KEY (MotherID) REFERENCES Animal (AnimalID), -- self FK หาแม่ แบบเดียวกันผิดไม่ได้เพราะ DB ไม่ใจดี
+     CONSTRAINT fk_animal_species FOREIGN KEY (SpeciesID) REFERENCES Species (SpeciesID), -- ผูกสายพันธุ์ให้แน่น ไม่ให้สัตว์หลุดจักรวาล
+     CONSTRAINT fk_animal_enclosure FOREIGN KEY (EnclosureID) REFERENCES Enclosure (EnclosureID) -- ผูกบ้านของสัตว์ให้ชัด จะได้ย้ายกรงได้แบบมีหลักฐาน
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางตัวเอกของระบบ พลาดตรงนี้แล้วงานงอกทั้งสวนสัตว์
+
+ -- DDL: สร้างตารางกิจกรรม
+ -- กิจกรรมต้องมีโซนรองรับก่อน ไม่งั้นจะให้โชว์กลางสุญญากาศหรือไง
+ CREATE TABLE EventSchedule ( -- ตารางกิจกรรมและการแสดงของสวนสัตว์ เก็บวันเวลาให้ไม่ต้องเดา
+     EventID INT(5) NOT NULL AUTO_INCREMENT, -- PK ของกิจกรรม เอาไว้ให้ Show_Reference มาเกาะต่อ
+     EventName VARCHAR(30) NOT NULL, -- ชื่อกิจกรรม ให้คนดูรู้ว่ากำลังจะดูอะไร
+     EventDate DATE NOT NULL, -- วันที่จัดกิจกรรม
+     EventTime TIME NOT NULL, -- เวลาจัดกิจกรรม แยกกับวันที่ตามเอกสาร ถึงจะทำ query เหนื่อยก็ต้องยอม
+     EventDetail VARCHAR(50) NOT NULL, -- รายละเอียดสั้นๆ ของกิจกรรม ไม่ใช่ปล่อยว่างจนคนดูงง
+     ZoneID INT(5) NOT NULL, -- FK ไป Zone เพราะโชว์ต้องมีสถานที่จริง ไม่ใช่จัดในมิติพิศวง
+     PRIMARY KEY (EventID), -- ตัวตั้งต้นของกิจกรรม
+     CONSTRAINT fk_eventschedule_zone FOREIGN KEY (ZoneID) REFERENCES Zone (ZoneID) -- ผูกโซนให้ชัด จะได้ไม่หลงเวที
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางกิจกรรมพร้อมให้ query ต่อยอดเรื่องตารางแสดง
+
+ -- DDL: สร้างตารางบัญชีผู้ใช้
+ -- [NOTE] เอกสารล่าสุดให้ UserAccount ผูกกับ Visitor แบบ 1:1 ก่อน ใครจะเพิ่มฝั่ง Admin ค่อยทำ migration แยก อย่าจับทุกอย่างยัดหม้อเดียว
+ CREATE TABLE UserAccount ( -- ตารางบัญชีผู้ใช้ของผู้เข้าชม เก็บ credential แบบแยกจากข้อมูลส่วนตัวให้พอมีมารยาท
+     UserID INT(5) NOT NULL AUTO_INCREMENT, -- PK ของบัญชี เอาไว้ให้ระบบ auth จับคนได้ถูกตัว
+     Username VARCHAR(30) NOT NULL, -- ชื่อผู้ใช้ที่คนต้องจำให้ได้เอง อย่าซ้ำจนระบบหัวหมุน
+     `Password` VARCHAR(30) NOT NULL, -- baseline ตามเอกสารก่อน เดี๋ยว migration ด้านล่างค่อยขยายให้พอรับ hash ของจริง
+     AccountStatus ENUM('ใช้งานอยู่', 'ถูกปิดใช้งาน') NOT NULL, -- สถานะบัญชีเอาไว้ soft delete แบบผู้ดีปลอมๆ
+     CreatedAt TIMESTAMP NOT NULL, -- เวลาสร้างบัญชี เก็บไว้ตามประวัติ จะได้รู้ว่าใครเกิดก่อนใคร
+     VisitorID INT(10) NOT NULL, -- จับให้ตรงกับ VisitorID ฝั่งแม่ไว้ก่อน ไม่งั้น FK ชอบงอแงเพราะเอกสารบางหน้าชอบให้ขนาดไม่ตรง
+     PRIMARY KEY (UserID), -- ตัวจริงของบัญชีผู้ใช้
+     UNIQUE KEY uq_useraccount_username (Username), -- Username ห้ามชน ไม่งั้น login จะกลายเป็นตลกร้าย
+     UNIQUE KEY uq_useraccount_visitor (VisitorID), -- บังคับ 1:1 กับ Visitor ตามที่เอกสารสั่งมาแบบไม่ต้องต่อรอง
+     CONSTRAINT fk_useraccount_visitor FOREIGN KEY (VisitorID) REFERENCES Visitor (VisitorID) -- บัญชีต้องมีเจ้าของที่เป็น Visitor จริง ไม่ใช่ผีจากไหนก็ได้
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตาราง auth ตามเอกสารล่าสุด แม้ logic admin เดิมจะยังคิดถึง EmployeeID อยู่ก็ตาม
+
+ -- DDL: สร้างตารางเบอร์โทรเจ้าหน้าที่
+ -- ตารางแยกสำหรับ multivalued attribute ตามตำราเป๊ะๆ จะได้ไม่ต้องยัดเบอร์หลายอันลงคอลัมน์เดียวแบบคนหมดไฟ
+ CREATE TABLE Phone ( -- ตารางเบอร์โทรเจ้าหน้าที่ เก็บหลายเบอร์ได้โดยไม่ทำ Admin บวมเป็นลูกโป่ง
+     Phone VARCHAR(15) NOT NULL, -- หมายเลขโทรศัพท์หนึ่งรายการของเจ้าหน้าที่
+     AdminID INT(5) NOT NULL, -- จับให้ตรงกับ Admin ฝั่งแม่ไว้ก่อน เอกสารบางหน้าเขียน 10 แต่ FK ไม่ชอบเรื่องหยุมหยิมแบบนั้น
+     PRIMARY KEY (Phone, AdminID), -- Composite PK กันเบอร์ซ้ำซ้อนในเจ้าหน้าที่คนเดิมแบบง่ายและได้ผล
+     CONSTRAINT fk_phone_admin FOREIGN KEY (AdminID) REFERENCES Admin (AdminID) -- ทุกเบอร์ต้องมีเจ้าของ ไม่งั้นจะเก็บไปทำไม
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางแยกเล็กๆ แต่ช่วยให้โครงสร้างไม่ดูบ้านๆ
+
+ -- DDL: สร้างตารางตั๋วเข้าชม
+ -- [NOTE] baseline นี้ยังไม่มี TicketToken เพราะบล็อก migration ด้านล่างจะค่อยอัปเกรดความปลอดภัยให้ทีหลัง
+ CREATE TABLE Ticket ( -- ตารางตั๋วเข้าชมของผู้ใช้ เก็บสถานะการซื้อและราคาก่อนจะโดน query รุ่นหลังๆ ขยี้ต่อ
+     TicketID INT(10) NOT NULL AUTO_INCREMENT, -- PK ของตั๋ว เอาไว้ให้ transaction จับเป้าหมายได้ตรงใบ
+     TicketType VARCHAR(20) NOT NULL, -- ประเภทตั๋ว เช่น เด็ก ผู้ใหญ่ หรืออะไรก็ว่าไป
+     VisitDate DATE NOT NULL, -- วันที่จะเข้าใช้งานจริง
+     TicketExpireDate DATETIME NOT NULL, -- วันหมดอายุของตั๋ว เก็บไว้กันคนถือของเก่ามาเถียง
+     PurchaseChannel VARCHAR(50) NULL, -- ช่องทางการซื้อ ปล่อย NULL ได้ก่อนเพราะตั๋วอาจยังค้างชำระ
+     PurchaseDate DATETIME NULL, -- วันที่ซื้อจริง ปล่อย NULL ได้จนกว่าจะจ่ายเงินสำเร็จ
+     Price DECIMAL(7,2) NOT NULL, -- ราคาตั้งต้นของตั๋ว เก็บแยกไว้ก่อนหักส่วนลดแบบคนมีหลักฐาน
+     VisitorID INT(10) NOT NULL, -- FK ไป Visitor เพราะตั๋วทุกใบต้องมีเจ้าของ
+     PromotionID INT(4) NULL, -- FK ไป Promotion ปล่อย NULL ได้เพราะไม่ใช่ทุกคนจะฉลาดพอใช้โค้ดลดราคา
+     PRIMARY KEY (TicketID), -- ตัวจริงของตั๋วทุกใบ
+     CONSTRAINT fk_ticket_visitor FOREIGN KEY (VisitorID) REFERENCES Visitor (VisitorID), -- เจ้าของตั๋วต้องมีตัวตนจริงในระบบ
+     CONSTRAINT fk_ticket_promotion FOREIGN KEY (PromotionID) REFERENCES Promotion (PromotionID) -- โปรโมชั่นถ้ามีก็ต้องเป็นตัวที่มีจริง ไม่ใช่โค้ดลมๆ
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางการเงินและการเข้าใช้งานผสมกันอยู่ตรงนี้แหละ อย่ามือสั่น
+
+ -- ---------------------------------------------
+ -- ตารางเชื่อมความสัมพันธ์
+ -- ---------------------------------------------
+
+ -- DDL: สร้างตารางเชื่อมสัตว์กับกิจกรรม
+ -- M:N ของแท้ ถ้าไม่ทำ junction table ก็เตรียม duplicate data จนอยากลบโปรเจกต์ทิ้ง
+ CREATE TABLE Show_Reference ( -- ตารางเชื่อมว่า event ไหนมีสัตว์ตัวไหนร่วมแสดงบ้าง
+     EventID INT(5) NOT NULL, -- FK ไป EventSchedule ฝั่งกิจกรรม
+     AnimalID INT(5) NOT NULL, -- FK ไป Animal ฝั่งสัตว์
+     AnimalDetail VARCHAR(100) NOT NULL, -- รายละเอียดบทบาทหรือข้อมูลเพิ่มของสัตว์ในโชว์นั้น
+     PRIMARY KEY (EventID, AnimalID), -- Composite PK กันคู่ซ้ำแบบจบๆ ไม่ต้องมี ID หลอกโลกเพิ่ม
+     CONSTRAINT fk_show_reference_event FOREIGN KEY (EventID) REFERENCES EventSchedule (EventID), -- event ต้องมีจริง ไม่ใช่ event ผี
+     CONSTRAINT fk_show_reference_animal FOREIGN KEY (AnimalID) REFERENCES Animal (AnimalID) -- animal ก็ต้องมีจริง ไม่ใช่เรียกตัวละครรับเชิญจากนอกจักรวาล
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางเชื่อม M:N มาตรฐาน อย่าพยายามฉลาดเกินตำราโดยไม่จำเป็น
+
+ -- DDL: สร้างตารางมอบหมายโซนให้เจ้าหน้าที่
+ -- อีกหนึ่ง M:N ที่ตรงไปตรงมา โซนหนึ่งมีเจ้าหน้าที่หลายคน เจ้าหน้าที่หนึ่งดูหลายโซน ก็ทำตารางกลางไป อย่าดันทุรัง
+ CREATE TABLE Assigned_To ( -- ตารางประวัติการมอบหมายโซนให้เจ้าหน้าที่แต่ละคน
+     ZoneID INT(5) NOT NULL, -- FK ไป Zone ฝั่งโซน
+     AdminID INT(5) NOT NULL, -- FK ไป Admin ฝั่งเจ้าหน้าที่
+     AssignedDate DATE NOT NULL, -- วันที่เริ่มมอบหมาย จะได้ไม่เถียงว่าใครรับผิดชอบก่อน
+     PRIMARY KEY (ZoneID, AdminID), -- Composite PK กันคู่ซ้ำแบบไม่ต้องเล่นของแถม
+     CONSTRAINT fk_assigned_to_zone FOREIGN KEY (ZoneID) REFERENCES Zone (ZoneID), -- โซนต้องมีอยู่จริงถึงจะมอบหมายได้
+     CONSTRAINT fk_assigned_to_admin FOREIGN KEY (AdminID) REFERENCES Admin (AdminID) -- เจ้าหน้าที่ก็ต้องมีตัวตนจริง ไม่ใช่ชื่อที่พิมพ์เล่นๆ
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตารางเชื่อมหน้าที่งาน ใครรับผิดชอบอะไรจะได้มีหลักฐาน
+
+ -- DDL: สร้างตารางประวัติการจัดการบัญชีโดย Admin
+ -- Audit trail แบบไม่โลกสวย ใครแก้อะไรไว้ก็ต้องทิ้งรอยตีนไว้ใน DB
+ CREATE TABLE Manage_By ( -- ตารางบันทึกว่า Admin คนไหนไปยุ่งกับ UserAccount ไหนมาบ้าง
+     UserID INT(5) NOT NULL, -- FK ไป UserAccount ฝั่งบัญชีผู้ใช้
+     AdminID INT(5) NOT NULL, -- FK ไป Admin ฝั่งคนที่ลงมือแก้
+     Edit_date DATE NOT NULL, -- วันที่แก้ไข เก็บให้ครบจะได้ย้อนดูได้
+     Edit_detail VARCHAR(255) NOT NULL, -- รายละเอียดการแก้ไข เขียนให้พอรู้เรื่อง ไม่ใช่ใส่แค่คำว่าแก้แล้ว
+     PRIMARY KEY (AdminID, UserID), -- Composite PK ตามเอกสาร จับคู่คนแก้กับบัญชีที่โดนแก้แบบตรงๆ
+     CONSTRAINT fk_manage_by_user FOREIGN KEY (UserID) REFERENCES UserAccount (UserID), -- บัญชีที่โดนแก้ต้องมีจริง
+     CONSTRAINT fk_manage_by_admin FOREIGN KEY (AdminID) REFERENCES Admin (AdminID) -- คนแก้ก็ต้องเป็น Admin จริง ไม่ใช่เทพจากไหนไม่รู้
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; -- ตาราง audit ที่ช่วยกันงานเผาในวันโดนถามหาคนรับผิดชอบ
+
+
+ -- =============================================
+ -- FUNCTION: สมัครสมาชิกและจัดการบัญชีผู้ใช้งาน
+ -- =============================================
+
+ -- [MIGRATION] บังคับ Password เก็บเป็น Hash เท่านั้น VARCHAR(255) กว้างพอรองรับ bcrypt/argon2
 -- ถ้าใครยังเก็บ plain text อยู่ถือว่าควรออกจากวงการ
 ALTER TABLE UserAccount
 MODIFY COLUMN `Password` VARCHAR(255) NOT NULL;
@@ -17,8 +219,8 @@ VALUES (?, ?, ?, ?, ?);
 -- CREATE: สร้างบัญชีผู้ใช้โดยผูกกับ Visitor
 -- [NOTE] Password ตรงนี้ต้องรับ Hash มาจากฝั่ง Backend แล้วเท่านั้น ย้ำ!
 -- แอบยัด 'ใช้งานอยู่' เป็น default ไปเลย ขี้เกียจไปทำ flow ยืนยันอีเมลตอนนี้
-INSERT INTO UserAccount (VisitorID, EmployeeID, CreatedAt, AccountStatus, `Password`, Username)
-VALUES (?, NULL, NOW(), 'ใช้งานอยู่', ?, ?);
+INSERT INTO UserAccount (VisitorID, CreatedAt, AccountStatus, `Password`, Username)
+VALUES (?, NOW(), 'ใช้งานอยู่', ?, ?);
 
 -- READ: ดูข้อมูลส่วนตัวของผู้ใช้
 -- ดึงข้อมูลข้าม 2 ตารางเฉพาะ account ที่ active
@@ -58,11 +260,11 @@ WHERE UserID = ?;
 
 -- READ: ตรวจสอบข้อมูลเข้าสู่ระบบและ role ที่อนุมานจาก schema
 -- [SECURITY] ดึง PasswordHash กลับไปให้ Backend ตรวจ อย่าใช้ `AND Password = ?` ใน WHERE เด็ดขาด!
--- [DESIGN] IsAdmin สร้างจาก logic ง่ายๆ: ถ้า EmployeeID ไม่ใช่ NULL ก็คือ Admin
+-- [DESIGN] IsAdmin สร้างจาก logic ง่ายๆ: FALSE ไปเลย เพราะ UserAccount ผูกกับ Visitor เท่านั้น
 -- LIMIT 1 ไว้กันเหนียว เผื่อเผลอแจก Username ซ้ำจะได้ไม่พังคาที่
-SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.VisitorID, ua.EmployeeID,
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.VisitorID,
        ua.`Password` AS PasswordHash,
-       (ua.EmployeeID IS NOT NULL) AS IsAdmin
+       FALSE AS IsAdmin -- schema นี้ไม่มี EmployeeID ใน UserAccount บัญชีคือ Visitor ล้วนๆ
 FROM UserAccount ua
 WHERE ua.Username = ? AND ua.AccountStatus = 'ใช้งานอยู่'
 LIMIT 1;
@@ -73,8 +275,8 @@ LIMIT 1;
 
 -- READ: เช็กสิทธิ์การใช้งานจาก UserID (เอาไว้ Re-verify token)
 -- เหมือนข้างบนเป๊ะ แค่เปลี่ยนเป็นเช็กจาก UserID เปลือง query ชะมัดแต่ก็ต้องทำ
-SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.VisitorID, ua.EmployeeID,
-       (ua.EmployeeID IS NOT NULL) AS IsAdmin
+SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.VisitorID,
+       FALSE AS IsAdmin -- เหมือนกัน ไม่มี Admin ในตารางนี้หรอก เลิกฝัน
 FROM UserAccount ua
 WHERE ua.UserID = ? AND ua.AccountStatus = 'ใช้งานอยู่'
 LIMIT 1;
@@ -82,14 +284,12 @@ LIMIT 1;
 -- READ: ดึงข้อมูลบัญชีทั้งหมดสำหรับ Admin
 -- ดึงพรืดเดียวจบ เอาข้อมูล Visitor กับ Admin มาต่อกัน
 -- [NOTE] กรองเฉพาะคนที่ 'ใช้งานอยู่' ไม่เอาศพมาแสดง
--- LEFT JOIN 2 ขากางร่มรับทั้งฝั่งคนมาเที่ยวและพนักงาน
+-- JOIN ไปหา Visitor ตรงๆ เพราะตารางนี้มีแต่ Visitor เท่านั้นแหละตอนนี้
 SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.CreatedAt,
-       ua.VisitorID, ua.EmployeeID,
-       v.VisitorFName, v.VisitorLName, v.VisitorEmail,
-       a.FirstName AS AdminFirstName, a.Surname AS AdminSurname, a.Email AS AdminEmail
+       ua.VisitorID,
+       v.VisitorFName, v.VisitorLName, v.VisitorEmail
 FROM UserAccount ua
-LEFT JOIN Visitor v ON ua.VisitorID = v.VisitorID
-LEFT JOIN Admin a ON ua.EmployeeID = a.AdminID
+JOIN Visitor v ON ua.VisitorID = v.VisitorID
 WHERE ua.AccountStatus = 'ใช้งานอยู่'
 ORDER BY ua.CreatedAt DESC;
 
@@ -97,11 +297,9 @@ ORDER BY ua.CreatedAt DESC;
 -- [PERF] LIKE 'prefix%' ใช้ Index ได้ อย่าทะลึ่งใส่ '%x%' เด็ดขาดถ้าไม่อยากให้ DB ร้องไห้
 -- Search แค่ Username พอละ ขี้เกียจไปไล่หาในอีเมลให้เปลือง CPU
 SELECT ua.UserID, ua.Username, ua.AccountStatus, ua.CreatedAt,
-       v.VisitorEmail,
-       a.Email AS AdminEmail
+       v.VisitorEmail
 FROM UserAccount ua
-LEFT JOIN Visitor v ON ua.VisitorID = v.VisitorID
-LEFT JOIN Admin a ON ua.EmployeeID = a.AdminID
+JOIN Visitor v ON ua.VisitorID = v.VisitorID
 WHERE ua.AccountStatus = 'ใช้งานอยู่' AND ua.Username LIKE CONCAT(?, '%');
 
 -- UPDATE: อัปเดตสถานะบัญชี
